@@ -1,16 +1,20 @@
 # Netlify build & deploy config for the React/Vite frontend.
 #
-# Connect this repo in Netlify and point "Base directory" to `apps/web`.
-# Netlify picks up the rest from here.
+# When the site is created with `packagePath: apps/web` (which Netlify sets
+# automatically if you point at `apps/web/` during `netlify init`), Netlify
+# reads THIS file from `apps/web/netlify.toml` — BUT the build still runs with
+# `cwd = repo root`, and all paths in this file are relative to the repo root.
+# That's the source of two common gotchas:
+#   1. The build command MUST NOT `cd ../..` — we're already at repo root.
+#   2. `publish` must be the workspace-relative path (`apps/web/dist`), not
+#      a bare `dist` (which would resolve to `/opt/build/repo/dist`).
 #
 # Environment variables to set in the Netlify UI (Site → Configuration → Env):
 #   VITE_API_URL = https://<your-api>.onrender.com/graphql
 
 [build]
-  # pnpm workspaces: install from repo root so the lockfile resolves correctly,
-  # then build only the web app.
-  command = "cd ../.. && corepack enable && pnpm install --frozen-lockfile && pnpm --filter @app/web build"
-  publish = "dist"
+  command = "corepack enable && pnpm install --frozen-lockfile && pnpm --filter @app/web build"
+  publish = "apps/web/dist"
 
 [build.environment]
   # Netlify ships an old Node by default; pin to the project's required major.
