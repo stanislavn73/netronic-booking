@@ -17,3 +17,14 @@ export interface SlotSuggestion {
   start: string;
   end: string;
 }
+
+export interface AvailabilityResult {
+  available: boolean;
+  /** Peak concurrent active sessions during the proposed window. */
+  conflictingCount: number;
+  capacity: number;
+  /** Largest duration (minutes) that would fit at the proposed start. */
+  maxAvailableDurationMinutes: number;
+  /** ISO-8601 instant where the cap is first reached, or null. */
+  fillsUpAt: string | null;
+}

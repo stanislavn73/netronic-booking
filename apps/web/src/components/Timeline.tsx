@@ -82,6 +82,62 @@ function assignLanes(sessions: Session[]): PlacedSession[] {
   return out;
 }
 
+/**
+ * Compute the PEAK concurrent active session count for each hour-row of the
+ * displayed day. We sweep events clipped to the [dayStart, dayEnd) window
+ * and, for every event, track the running active count; the peak we observe
+ * inside hour H is the chip we render on that row.
+ *
+ * This is the same algorithm as `services/sessions.ts → maxConcurrentDuring`,
+ * mirrored on the client purely for the visual density display. The server
+ * remains the source of truth for cap enforcement.
+ */
+function hourlyPeakConcurrent(
+  sessions: Session[],
+  dayStartMs: number,
+): number[] {
+  const peaks = new Array<number>(24).fill(0);
+  if (sessions.length === 0) return peaks;
+
+  type Event = { t: number; delta: number; order: number };
+  const events: Event[] = [];
+  for (const s of sessions) {
+    const sMs = Math.max(+new Date(s.startTime), dayStartMs);
+    const eMs = Math.min(+new Date(s.endTime), dayStartMs + DAY_MS);
+    if (eMs <= sMs) continue;
+    events.push({ t: sMs, delta: +1, order: 1 });
+    events.push({ t: eMs, delta: -1, order: 0 });
+  }
+  events.sort((a, b) => a.t - b.t || a.order - b.order);
+
+  let active = 0;
+  let cursorMs = dayStartMs;
+  let cursorHour = 0;
+  for (const ev of events) {
+    // For every hour we span getting from cursor to ev.t, the active count
+    // hasn't changed yet — record the current `active` as a candidate peak
+    // for those hours.
+    while (cursorHour < 24 && dayStartMs + (cursorHour + 1) * 3_600_000 <= ev.t) {
+      if (active > (peaks[cursorHour] ?? 0)) peaks[cursorHour] = active;
+      cursorHour += 1;
+    }
+    // Apply the event and update the hour the event itself lives in.
+    const evHour = Math.min(23, Math.floor((ev.t - dayStartMs) / 3_600_000));
+    if (active > (peaks[evHour] ?? 0)) peaks[evHour] = active;
+    active += ev.delta;
+    if (active > (peaks[evHour] ?? 0)) peaks[evHour] = active;
+    cursorMs = ev.t;
+  }
+  // Tail: from the last event to end of day, `active` is constant.
+  while (cursorHour < 24) {
+    if (active > (peaks[cursorHour] ?? 0)) peaks[cursorHour] = active;
+    cursorHour += 1;
+  }
+  // Suppress unused-var warning (cursorMs is conceptual only).
+  void cursorMs;
+  return peaks;
+}
+
 export function Timeline({ arenaId, date, onEditSession, onClickEmpty }: Props) {
   const { from, to } = useMemo(() => dayWindow(date), [date]);
 
@@ -94,6 +150,10 @@ export function Timeline({ arenaId, date, onEditSession, onClickEmpty }: Props) 
   );
 
   const placed = useMemo(() => assignLanes(data?.sessionsByArena ?? []), [data]);
+  const hourlyPeaks = useMemo(
+    () => hourlyPeakConcurrent(data?.sessionsByArena ?? [], +from),
+    [data, from],
+  );
   const totalHeight = 24 * HOUR_PX;
 
   const handleEmptyClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -119,18 +179,43 @@ export function Timeline({ arenaId, date, onEditSession, onClickEmpty }: Props) 
       </div>
       <div className="flex-1 overflow-auto">
         <div className="relative ml-12" style={{ height: totalHeight }}>
-          {/* Hour grid */}
-          {Array.from({ length: 24 }, (_, h) => (
-            <div
-              key={h}
-              className="border-t border-zinc-800/60 text-xs text-zinc-500"
-              style={{ height: HOUR_PX }}
-            >
-              <span className="absolute -ml-12 -mt-2 w-10 text-right pr-2">
-                {h.toString().padStart(2, '0')}:00
-              </span>
-            </div>
-          ))}
+          {/* Hour grid + density chips */}
+          {Array.from({ length: 24 }, (_, h) => {
+            const peak = hourlyPeaks[h] ?? 0;
+            const isFull = peak >= LANES;
+            const isBusy = !isFull && peak >= LANES - 1;
+            return (
+              <div
+                key={h}
+                className="border-t border-zinc-800/60 text-xs text-zinc-500"
+                style={{ height: HOUR_PX }}
+              >
+                <span className="absolute -ml-12 -mt-2 w-10 text-right pr-2">
+                  {h.toString().padStart(2, '0')}:00
+                </span>
+                {/* Per-hour peak-concurrent chip. Sits at the far right edge so
+                    it doesn't fight the click-to-create overlay (which it sits
+                    above visually but inside still — pointer-events disabled). */}
+                <span
+                  className={clsx(
+                    'pointer-events-none absolute right-1 -mt-2 rounded px-1.5 py-0.5 text-[10px] tabular-nums',
+                    isFull
+                      ? 'bg-red-500/20 text-red-200 border border-red-500/40'
+                      : isBusy
+                        ? 'bg-amber-500/15 text-amber-200 border border-amber-500/30'
+                        : 'bg-zinc-800/60 text-zinc-400 border border-zinc-700/50',
+                  )}
+                  title={
+                    isFull
+                      ? `Peak ${peak}/${LANES} — at cap somewhere in this hour, new sessions may not fit`
+                      : `Peak concurrent in this hour: ${peak}/${LANES}`
+                  }
+                >
+                  {peak}/{LANES}
+                </span>
+              </div>
+            );
+          })}
 
           {/* Click-to-create overlay */}
           <div

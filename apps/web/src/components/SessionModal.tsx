@@ -1,15 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { useMutation } from '@apollo/client';
+import { useMutation, useQuery } from '@apollo/client';
 import {
+  CHECK_AVAILABILITY,
   CREATE_SESSION,
   DELETE_SESSION,
   SESSIONS_BY_ARENA,
   UPDATE_SESSION,
 } from '../gql/queries';
-import type { Session, SlotSuggestion } from '../lib/types';
+import type { AvailabilityResult, Session, SlotSuggestion } from '../lib/types';
 import { dayWindow } from '../lib/date';
 import { format } from 'date-fns';
 
@@ -37,6 +38,11 @@ function isoLocal(d: Date) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** Format a "HH:mm (local)" badge for fillsUpAt / suggestion timestamps. */
+function localHm(iso: string) {
+  return format(new Date(iso), 'HH:mm');
+}
+
 export function SessionModal({ mode, arenaId, date, onClose }: Props) {
   const isEdit = mode.kind === 'edit';
   const initial = isEdit ? new Date(mode.session.startTime) : mode.initialStart;
@@ -46,6 +52,7 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
     register,
     handleSubmit,
     setValue,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<FormData>({
     resolver: zodResolver(FormSchema),
@@ -56,9 +63,49 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
     },
   });
 
+  // Watch the live start-time value so the availability probe re-runs when
+  // the user types or applies a suggestion.
+  const currentStartLocal = watch('startTime');
+  const currentStartIso = useMemo(() => {
+    if (!currentStartLocal) return null;
+    const d = new Date(currentStartLocal);
+    return Number.isNaN(+d) ? null : d.toISOString();
+  }, [currentStartLocal]);
+
+  // Probe the server for occupancy at the current start. We pass a placeholder
+  // duration (5 min) because we only care about `maxAvailableDurationMinutes`
+  // which depends solely on `startTime`. Apollo caches by variables, so this
+  // doesn't refetch unless the start moves.
+  const { data: availData } = useQuery<{ checkAvailability: AvailabilityResult }>(
+    CHECK_AVAILABILITY,
+    {
+      skip: !currentStartIso,
+      variables: currentStartIso
+        ? { arenaId, startTime: currentStartIso, durationMinutes: 5 }
+        : undefined,
+      fetchPolicy: 'cache-and-network',
+    },
+  );
+  const maxFitMin = availData?.checkAvailability.maxAvailableDurationMinutes;
+
+  // For NEW sessions, when the probe first comes back, lower the default
+  // duration to fit if our default 60 wouldn't actually be accepted. This
+  // means clicking an "almost full" slot opens the modal with a duration
+  // the user can actually submit, not one that's destined to be rejected.
+  const [didAutoFit, setDidAutoFit] = useState(false);
+  useEffect(() => {
+    if (isEdit || didAutoFit || maxFitMin == null) return;
+    if (maxFitMin >= 5 && maxFitMin < initialDuration) {
+      setValue('durationMinutes', maxFitMin);
+    }
+    setDidAutoFit(true);
+  }, [isEdit, didAutoFit, maxFitMin, initialDuration, setValue]);
+
   const [serverError, setServerError] = useState<{
     message: string;
     suggestions?: SlotSuggestion[];
+    fillsUpAt?: string | null;
+    maxAvailableDurationMinutes?: number;
   } | null>(null);
 
   // Reuse the SAME dayWindow Timeline uses so Apollo's cache key matches
@@ -122,7 +169,12 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
       return;
     }
     if (payload.__typename === 'SlotUnavailable') {
-      setServerError({ message: payload.message, suggestions: payload.suggestions });
+      setServerError({
+        message: payload.message,
+        suggestions: payload.suggestions,
+        fillsUpAt: payload.fillsUpAt,
+        maxAvailableDurationMinutes: payload.maxAvailableDurationMinutes,
+      });
       return;
     }
     if (payload.__typename === 'ValidationFailed') {
@@ -139,7 +191,7 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
 
   const onDelete = async () => {
     if (!isEdit) return;
-    if (!confirm('Cancel this session?')) return;
+    if (!confirm('Delete this session?')) return;
     await deleteMutation({ variables: { id: mode.session.id } });
     onClose();
   };
@@ -148,6 +200,13 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
     setValue('startTime', isoLocal(new Date(s.start)));
     const durMin = Math.round((+new Date(s.end) - +new Date(s.start)) / 60_000);
     setValue('durationMinutes', durMin);
+    setServerError(null);
+  };
+
+  /** Replace the duration field with the server's max-fit value. */
+  const applyMaxFit = () => {
+    if (maxFitMin == null || maxFitMin < 5) return;
+    setValue('durationMinutes', maxFitMin);
     setServerError(null);
   };
 
@@ -206,6 +265,29 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
             {errors.durationMinutes && (
               <p className="mt-1 text-xs text-red-400">{errors.durationMinutes.message}</p>
             )}
+            {maxFitMin != null && (
+              <p className="mt-1 text-xs text-zinc-500">
+                {maxFitMin >= 24 * 60 ? (
+                  <>All-clear at this start — fits up to 24 h.</>
+                ) : maxFitMin < 5 ? (
+                  <>
+                    <span className="text-red-400">No room at this start — pick a later time.</span>
+                  </>
+                ) : (
+                  <>
+                    Fits up to{' '}
+                    <button
+                      type="button"
+                      onClick={applyMaxFit}
+                      className="underline decoration-dotted text-emerald-300 hover:text-emerald-200"
+                    >
+                      {maxFitMin} min
+                    </button>{' '}
+                    without exceeding the {availData!.checkAvailability.capacity}-session cap.
+                  </>
+                )}
+              </p>
+            )}
           </div>
 
           <div>
@@ -223,6 +305,26 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
           {serverError && (
             <div className="rounded-md border border-red-900/50 bg-red-950/40 p-3 text-sm">
               <div className="font-medium text-red-300">{serverError.message}</div>
+              {serverError.fillsUpAt && (
+                <div className="mt-1 text-xs text-red-200/80">
+                  Slot fills at <span className="font-mono">{localHm(serverError.fillsUpAt)}</span>.
+                  {serverError.maxAvailableDurationMinutes != null &&
+                    serverError.maxAvailableDurationMinutes >= 5 && (
+                      <>
+                        {' '}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setValue('durationMinutes', serverError.maxAvailableDurationMinutes!)
+                          }
+                          className="underline decoration-dotted text-emerald-300 hover:text-emerald-200"
+                        >
+                          Try {serverError.maxAvailableDurationMinutes} min instead
+                        </button>
+                      </>
+                    )}
+                </div>
+              )}
               {serverError.suggestions && serverError.suggestions.length > 0 && (
                 <div className="mt-2">
                   <div className="mb-1 text-xs text-red-200/70">
@@ -254,7 +356,7 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
                   disabled={deleting}
                   className="rounded-md border border-red-800 px-3 py-2 text-sm text-red-300 hover:bg-red-950/40"
                 >
-                  Cancel session
+                  Delete session
                 </button>
               )}
             </div>

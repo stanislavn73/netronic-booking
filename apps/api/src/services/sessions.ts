@@ -19,6 +19,7 @@ import { rangeLiteral, parseRange } from '../db/range.js';
 import { DomainError } from './errors.js';
 import {
   ARENA_CAPACITY,
+  MAX_DURATION_MIN,
   type NormalizedSession,
   normalizeInput,
   SessionInputSchema,
@@ -89,9 +90,21 @@ async function arenaExists(client: PoolClient | Pool, arenaId: number): Promise<
 }
 
 /**
- * Maximum number of ACTIVE sessions that are simultaneously running at any
- * instant inside the half-open window [start, end). The half-open form means
- * end == otherStart does NOT count as overlap, matching the spec example.
+ * Result of a concurrency probe over a window.
+ *   - `max`         : peak number of simultaneously active sessions seen.
+ *   - `firstFillAt` : the first instant where the running count reaches CAPACITY,
+ *                     or `null` if the cap is never hit in this window.
+ *                     Used to surface "your booking would conflict at HH:MM" UX.
+ */
+interface ConcurrencyProbe {
+  max: number;
+  firstFillAt: Date | null;
+}
+
+/**
+ * Maximum number of ACTIVE sessions simultaneously running at any instant
+ * inside the half-open window [start, end), plus the first instant at which
+ * the cap is reached.
  *
  * Why max-concurrent and not COUNT(*) of overlapping rows:
  *   The spec says "the system shall not allow create/update if AT ANY MOMENT
@@ -110,8 +123,7 @@ async function maxConcurrentDuring(
   start: Date,
   end: Date,
   excludeId?: number,
-): Promise<number> {
-  // Pull just the bounds of every overlapping active session.
+): Promise<ConcurrencyProbe> {
   const { rows } = await client.query<{ s: Date; e: Date }>(
     `
     SELECT lower(during) AS s, upper(during) AS e
@@ -125,7 +137,7 @@ async function maxConcurrentDuring(
       ? [arenaId, rangeLiteral(start, end), excludeId]
       : [arenaId, rangeLiteral(start, end)],
   );
-  if (rows.length === 0) return 0;
+  if (rows.length === 0) return { max: 0, firstFillAt: null };
 
   // Sweep-line over events CLIPPED to the proposed window. Each session
   // contributes +1 when it (re-)enters the window and -1 when it leaves.
@@ -147,11 +159,72 @@ async function maxConcurrentDuring(
 
   let active = 0;
   let max = 0;
+  let firstFillAt: Date | null = null;
   for (const ev of events) {
     active += ev.delta;
     if (active > max) max = active;
+    if (firstFillAt === null && active >= ARENA_CAPACITY) {
+      firstFillAt = new Date(ev.t);
+    }
   }
-  return max;
+  return { max, firstFillAt };
+}
+
+/**
+ * How long a new session starting at `start` could run without exceeding the
+ * cap. Returns the largest duration (in ms) such that, throughout
+ * `[start, start + duration)`, the count of existing active sessions stays
+ * STRICTLY BELOW capacity (so adding this proposal keeps total ≤ capacity).
+ *
+ * The function caps its own search at `horizonMs` (default 24h — the spec's
+ * max session duration). Returns 0 if the arena is already saturated at the
+ * requested instant.
+ */
+async function maxAvailableDurationMs(
+  client: PoolClient,
+  arenaId: number,
+  start: Date,
+  horizonMs: number = MAX_DURATION_MIN * 60_000,
+  excludeId?: number,
+): Promise<number> {
+  const startMs = start.getTime();
+  const horizonEndMs = startMs + horizonMs;
+  const horizonEnd = new Date(horizonEndMs);
+
+  const { rows } = await client.query<{ s: Date; e: Date }>(
+    `
+    SELECT lower(during) AS s, upper(during) AS e
+    FROM sessions
+    WHERE arena_id = $1
+      AND status = 'active'
+      AND during && $2::tstzrange
+      ${excludeId ? 'AND id <> $3' : ''}
+    `,
+    excludeId
+      ? [arenaId, rangeLiteral(start, horizonEnd), excludeId]
+      : [arenaId, rangeLiteral(start, horizonEnd)],
+  );
+  if (rows.length === 0) return horizonMs;
+
+  type Event = { t: number; delta: number; order: number };
+  const events: Event[] = [];
+  for (const r of rows) {
+    const sMs = Math.max(new Date(r.s).getTime(), startMs);
+    const eMs = Math.min(new Date(r.e).getTime(), horizonEndMs);
+    if (eMs <= sMs) continue;
+    events.push({ t: sMs, delta: +1, order: 1 });
+    events.push({ t: eMs, delta: -1, order: 0 });
+  }
+  events.sort((a, b) => a.t - b.t || a.order - b.order);
+
+  // Walk events; the first time active reaches CAPACITY is the upper bound
+  // of how long our proposal can run. Until then, adding 1 keeps total ≤ cap.
+  let active = 0;
+  for (const ev of events) {
+    active += ev.delta;
+    if (active >= ARENA_CAPACITY) return Math.max(0, ev.t - startMs);
+  }
+  return horizonMs;
 }
 
 // =============================================================================
@@ -236,8 +309,20 @@ export async function sessionsByArenaBatch(
 
 export interface AvailabilityResult {
   available: boolean;
+  /** Peak concurrent active sessions during the proposed window. */
   conflictingCount: number;
   capacity: number;
+  /**
+   * Max duration (minutes) that COULD fit at the requested start without
+   * exceeding the cap. Useful for UI to surface "your slot fits up to N min"
+   * when the requested duration is too long.
+   */
+  maxAvailableDurationMinutes: number;
+  /**
+   * First instant within the proposed window at which the cap is reached,
+   * if any. `null` if the proposal would not exceed the cap.
+   */
+  fillsUpAt: Date | null;
 }
 
 export async function checkAvailability(
@@ -250,8 +335,15 @@ export async function checkAvailability(
   }
   const client = await pool.connect();
   try {
-    const count = await maxConcurrentDuring(client, arenaId, start, end);
-    return { available: count < ARENA_CAPACITY, conflictingCount: count, capacity: ARENA_CAPACITY };
+    const probe = await maxConcurrentDuring(client, arenaId, start, end);
+    const maxAvailMs = await maxAvailableDurationMs(client, arenaId, start);
+    return {
+      available: probe.max < ARENA_CAPACITY,
+      conflictingCount: probe.max,
+      capacity: ARENA_CAPACITY,
+      maxAvailableDurationMinutes: Math.floor(maxAvailMs / 60_000),
+      fillsUpAt: probe.firstFillAt,
+    };
   } finally {
     client.release();
   }
@@ -266,12 +358,22 @@ export async function createSession(input: SessionInput): Promise<SessionRecord>
   }
 
   return withArenaLock(norm.arenaId, async (client) => {
-    const conflicting = await maxConcurrentDuring(client, norm.arenaId, norm.start, norm.end);
-    if (conflicting >= ARENA_CAPACITY) {
+    const probe = await maxConcurrentDuring(client, norm.arenaId, norm.start, norm.end);
+    if (probe.max >= ARENA_CAPACITY) {
+      const maxAvailMs = await maxAvailableDurationMs(client, norm.arenaId, norm.start);
       throw new DomainError(
         'SLOT_UNAVAILABLE',
-        `Arena ${norm.arenaId} is at capacity (${conflicting}/${ARENA_CAPACITY}) for the requested window`,
-        { arenaId: norm.arenaId, start: norm.start, end: norm.end, conflictingCount: conflicting },
+        probe.firstFillAt
+          ? `Arena ${norm.arenaId} fills up at ${probe.firstFillAt.toISOString()} — your proposal would exceed capacity from that point on`
+          : `Arena ${norm.arenaId} is at capacity (${probe.max}/${ARENA_CAPACITY}) for the requested window`,
+        {
+          arenaId: norm.arenaId,
+          start: norm.start,
+          end: norm.end,
+          conflictingCount: probe.max,
+          fillsUpAt: probe.firstFillAt,
+          maxAvailableDurationMinutes: Math.floor(maxAvailMs / 60_000),
+        },
       );
     }
     const { rows } = await client.query(
@@ -319,12 +421,22 @@ export async function updateSession(id: number, input: UpdateSessionInput): Prom
   }
 
   return withArenaLock(currentRec.arenaId, async (client) => {
-    const conflicting = await maxConcurrentDuring(client, currentRec.arenaId, start, end, id);
-    if (conflicting >= ARENA_CAPACITY) {
+    const probe = await maxConcurrentDuring(client, currentRec.arenaId, start, end, id);
+    if (probe.max >= ARENA_CAPACITY) {
+      const maxAvailMs = await maxAvailableDurationMs(client, currentRec.arenaId, start, undefined, id);
       throw new DomainError(
         'SLOT_UNAVAILABLE',
-        `Arena ${currentRec.arenaId} would exceed capacity if this session moved here`,
-        { arenaId: currentRec.arenaId, start, end, conflictingCount: conflicting },
+        probe.firstFillAt
+          ? `Arena ${currentRec.arenaId} fills up at ${probe.firstFillAt.toISOString()} — moving this session there would exceed capacity`
+          : `Arena ${currentRec.arenaId} would exceed capacity if this session moved here`,
+        {
+          arenaId: currentRec.arenaId,
+          start,
+          end,
+          conflictingCount: probe.max,
+          fillsUpAt: probe.firstFillAt,
+          maxAvailableDurationMinutes: Math.floor(maxAvailMs / 60_000),
+        },
       );
     }
     // playerName semantics: `undefined` keeps existing, anything else (string|null)

@@ -108,6 +108,10 @@ interface SlotUnavailableT {
   conflictingCount: number;
   capacity: number;
   suggestions: Array<{ start: Date; end: Date }>;
+  /** The first instant inside the proposal where the cap is reached. */
+  fillsUpAt: Date | null;
+  /** Max duration (minutes) that would fit at the proposed start. */
+  maxAvailableDurationMinutes: number;
 }
 const SlotUnavailableRef = builder.objectRef<SlotUnavailableT>('SlotUnavailable');
 SlotUnavailableRef.implement({
@@ -116,6 +120,12 @@ SlotUnavailableRef.implement({
     conflictingCount: t.exposeInt('conflictingCount'),
     capacity: t.exposeInt('capacity'),
     suggestions: t.field({ type: [SlotRef], resolve: (p) => p.suggestions }),
+    fillsUpAt: t.field({
+      type: 'DateTime',
+      nullable: true,
+      resolve: (p) => p.fillsUpAt,
+    }),
+    maxAvailableDurationMinutes: t.exposeInt('maxAvailableDurationMinutes'),
   }),
 });
 
@@ -175,12 +185,22 @@ const AvailabilityResultRef = builder.objectRef<{
   available: boolean;
   conflictingCount: number;
   capacity: number;
+  maxAvailableDurationMinutes: number;
+  fillsUpAt: Date | null;
 }>('AvailabilityResult');
 AvailabilityResultRef.implement({
   fields: (t) => ({
     available: t.exposeBoolean('available'),
     conflictingCount: t.exposeInt('conflictingCount'),
     capacity: t.exposeInt('capacity'),
+    /** How long a proposal at this start can run without exceeding the cap. */
+    maxAvailableDurationMinutes: t.exposeInt('maxAvailableDurationMinutes'),
+    /** When the cap is first reached inside the proposed window, if at all. */
+    fillsUpAt: t.field({
+      type: 'DateTime',
+      nullable: true,
+      resolve: (p) => p.fillsUpAt,
+    }),
   }),
 });
 
@@ -232,6 +252,8 @@ async function unavailableWithSuggestions(args: {
   start: Date;
   end: Date;
   conflictingCount: number;
+  fillsUpAt: Date | null;
+  maxAvailableDurationMinutes: number;
 }): Promise<SlotUnavailableT> {
   const durationMs = args.end.getTime() - args.start.getTime();
   const suggestions = await suggestSlots({
@@ -239,11 +261,18 @@ async function unavailableWithSuggestions(args: {
     preferredStart: args.start,
     durationMs,
   });
+  // Human-friendly message — service already produced a more precise one,
+  // but we cap it in case the client only looks at `message`.
+  const message = args.fillsUpAt
+    ? `Slot fills up at ${args.fillsUpAt.toISOString()} — your proposal would exceed ${ARENA_CAPACITY} concurrent`
+    : `Slot unavailable — ${args.conflictingCount} of ${ARENA_CAPACITY} concurrent sessions already booked`;
   return {
-    message: `Slot unavailable — ${args.conflictingCount} of ${ARENA_CAPACITY} concurrent sessions already booked`,
+    message,
     conflictingCount: args.conflictingCount,
     capacity: ARENA_CAPACITY,
     suggestions,
+    fillsUpAt: args.fillsUpAt,
+    maxAvailableDurationMinutes: args.maxAvailableDurationMinutes,
   };
 }
 
@@ -373,7 +402,13 @@ builder.mutationType({
               // populated on SLOT_UNAVAILABLE); fall back to deriving from the
               // raw input for forward-compatibility if a future code path
               // forgets to include them.
-              const meta = err.meta as { start?: Date; end?: Date; conflictingCount?: number };
+              const meta = err.meta as {
+                start?: Date;
+                end?: Date;
+                conflictingCount?: number;
+                fillsUpAt?: Date | null;
+                maxAvailableDurationMinutes?: number;
+              };
               const start = meta.start ?? input.startTime;
               const end =
                 meta.end ??
@@ -390,6 +425,8 @@ builder.mutationType({
                 start,
                 end,
                 conflictingCount: Number(meta.conflictingCount ?? 0),
+                fillsUpAt: meta.fillsUpAt ?? null,
+                maxAvailableDurationMinutes: Number(meta.maxAvailableDurationMinutes ?? 0),
               });
             }
             return { issues: [{ field: '_root', message: err.message }] };
@@ -429,12 +466,16 @@ builder.mutationType({
                 start: Date;
                 end: Date;
                 conflictingCount: number;
+                fillsUpAt?: Date | null;
+                maxAvailableDurationMinutes?: number;
               };
               return unavailableWithSuggestions({
                 arenaId: meta.arenaId,
                 start: meta.start,
                 end: meta.end,
                 conflictingCount: meta.conflictingCount,
+                fillsUpAt: meta.fillsUpAt ?? null,
+                maxAvailableDurationMinutes: Number(meta.maxAvailableDurationMinutes ?? 0),
               });
             }
             return { issues: [{ field: '_root', message: err.message }] };

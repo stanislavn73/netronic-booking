@@ -21,6 +21,34 @@ export const ARENAS_QUERY = gql`
   }
 `;
 
+/**
+ * Probes the arena for a proposed start. Returns the post-fix peak concurrent
+ * count, the largest duration that would actually fit at this start without
+ * exceeding the cap, and the first instant the cap is reached (if any).
+ *
+ * The modal calls this once on open to set a sensible default duration and
+ * surface a "fits up to N min" helper next to the duration field.
+ */
+export const CHECK_AVAILABILITY = gql`
+  query CheckAvailability(
+    $arenaId: ID!
+    $startTime: DateTime!
+    $durationMinutes: Int!
+  ) {
+    checkAvailability(
+      arenaId: $arenaId
+      startTime: $startTime
+      durationMinutes: $durationMinutes
+    ) {
+      available
+      conflictingCount
+      capacity
+      maxAvailableDurationMinutes
+      fillsUpAt
+    }
+  }
+`;
+
 export const SESSIONS_BY_ARENA = gql`
   ${SESSION_FIELDS}
   query SessionsByArena($arenaId: ID!, $from: DateTime!, $to: DateTime!) {
@@ -48,6 +76,8 @@ export const CREATE_SESSION = gql`
           start
           end
         }
+        fillsUpAt
+        maxAvailableDurationMinutes
       }
       ... on ValidationFailed {
         issues {
@@ -80,6 +110,8 @@ export const UPDATE_SESSION = gql`
           start
           end
         }
+        fillsUpAt
+        maxAvailableDurationMinutes
       }
       ... on ValidationFailed {
         issues {
