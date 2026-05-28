@@ -1,9 +1,10 @@
 import { DensityChip } from '@/components/Timeline/DensityChip';
 import { HOUR_PX } from '@/components/Timeline/constants';
+import type { HourDensity } from '@/lib/concurrency';
 
 interface Props {
-  /** Length-24 array of per-hour peak concurrent counts. */
-  hourlyPeaks: readonly number[];
+  /** Length-24 array of per-hour density summaries. */
+  hourly: readonly HourDensity[];
 }
 
 /**
@@ -11,7 +12,7 @@ interface Props {
  * click-to-create overlay and the absolutely-positioned session blocks are
  * siblings rendered by the parent Timeline.
  */
-export function HourGrid({ hourlyPeaks }: Props) {
+export function HourGrid({ hourly }: Props) {
   return (
     <>
       {Array.from({ length: 24 }, (_, h) => (
@@ -23,7 +24,7 @@ export function HourGrid({ hourlyPeaks }: Props) {
           <span className="absolute -ml-12 -mt-2 w-10 text-right pr-2">
             {h.toString().padStart(2, '0')}:00
           </span>
-          <DensityChip peak={hourlyPeaks[h] ?? 0} />
+          <DensityChip density={hourly[h] ?? { peak: 0, capFraction: 0 }} />
         </div>
       ))}
     </>

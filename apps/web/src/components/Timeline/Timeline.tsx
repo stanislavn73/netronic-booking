@@ -3,9 +3,10 @@ import { addHours, format } from 'date-fns';
 import { HOUR_PX } from '@/components/Timeline/constants';
 import { HourGrid } from '@/components/Timeline/HourGrid';
 import { SessionBlock } from '@/components/Timeline/SessionBlock';
+import { LANES } from '@/components/Timeline/constants';
 import { assignLanes } from '@/components/Timeline/lanes';
 import { useDayOfSessions } from '@/hooks/useDayOfSessions';
-import { hourlyPeakConcurrent } from '@/lib/concurrency';
+import { hourlyDensity } from '@/lib/concurrency';
 import type { Session } from '@/lib/types';
 
 interface Props {
@@ -32,8 +33,8 @@ export function Timeline({ arenaId, date, onEditSession, onClickEmpty }: Props) 
   const sessions = data?.sessionsByArena ?? [];
 
   const placed = useMemo(() => assignLanes(sessions), [sessions]);
-  const hourlyPeaks = useMemo(
-    () => hourlyPeakConcurrent(sessions, +from),
+  const hourly = useMemo(
+    () => hourlyDensity(sessions, +from, LANES),
     [sessions, from],
   );
 
@@ -58,7 +59,7 @@ export function Timeline({ arenaId, date, onEditSession, onClickEmpty }: Props) 
       </div>
       <div className="flex-1 overflow-auto">
         <div className="relative ml-12" style={{ height: TOTAL_HEIGHT_PX }}>
-          <HourGrid hourlyPeaks={hourlyPeaks} />
+          <HourGrid hourly={hourly} />
           <div
             className="absolute inset-0 cursor-crosshair"
             onClick={handleEmptyClick}
