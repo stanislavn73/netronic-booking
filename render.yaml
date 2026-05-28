@@ -23,7 +23,13 @@ services:
     plan: free
     region: oregon
     rootDir: apps/api
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    # `--prod=false` is critical here: Render sets NODE_ENV=production globally,
+    # which makes pnpm skip devDependencies by default. The build needs `tsc`
+    # and `@types/node` (devDeps), and runtime needs `tsx` for the migration
+    # script — all of which would otherwise be excluded. `--prod=false`
+    # overrides that for this install only; NODE_ENV stays `production` at
+    # runtime so the app behaves correctly.
+    buildCommand: corepack enable && pnpm install --frozen-lockfile --prod=false && pnpm build
     # NOTE: Render's free tier does not support `preDeployCommand`, so we run
     # migrations inside the start command. `scripts/migrate.ts` records every
     # applied filename in `schema_migrations`, so subsequent boots are no-ops
