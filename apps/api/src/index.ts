@@ -17,7 +17,10 @@ import type { GraphQLContext } from './graphql/builder.js';
 
 async function main() {
   const app = Fastify({
-    logger,
+    // Fastify 5 renamed the option that accepts a pre-built logger instance.
+    // Passing `logger: pinoInstance` throws FST_ERR_LOG_INVALID_LOGGER_CONFIG
+    // because that field now only accepts a config object or boolean.
+    loggerInstance: logger,
     bodyLimit: 1024 * 1024, // 1 MB — GraphQL queries are never bigger
   });
 
