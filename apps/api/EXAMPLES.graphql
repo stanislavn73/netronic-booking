@@ -1,0 +1,116 @@
+# Sample queries — paste into http://localhost:4000/graphql
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Browse arenas
+# ─────────────────────────────────────────────────────────────────────────────
+query Arenas {
+  arenas(limit: 10) {
+    id
+    name
+  }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# List sessions for an arena on a given day
+# ─────────────────────────────────────────────────────────────────────────────
+query Day($arenaId: ID!, $from: DateTime!, $to: DateTime!) {
+  sessionsByArena(arenaId: $arenaId, from: $from, to: $to) {
+    id
+    startTime
+    endTime
+    durationMinutes
+    playerName
+    status
+  }
+}
+# Variables:
+# {
+#   "arenaId": "1",
+#   "from": "2026-05-18T00:00:00Z",
+#   "to":   "2026-05-19T00:00:00Z"
+# }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check availability before booking
+# ─────────────────────────────────────────────────────────────────────────────
+query Check {
+  checkAvailability(arenaId: "1", startTime: "2026-05-18T10:00:00Z", durationMinutes: 60) {
+    available
+    conflictingCount
+    capacity
+  }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Create — happy path
+# ─────────────────────────────────────────────────────────────────────────────
+mutation Create($input: CreateSessionInput!) {
+  createSession(input: $input) {
+    __typename
+    ... on SessionPayload {
+      session { id startTime endTime }
+    }
+    ... on SlotUnavailable {
+      message
+      conflictingCount
+      capacity
+      suggestions { start end }
+    }
+    ... on ValidationFailed {
+      issues { field message }
+    }
+    ... on NotFound { message }
+  }
+}
+# Variables:
+# {
+#   "input": {
+#     "arenaId": "1",
+#     "startTime": "2026-05-18T10:00:00Z",
+#     "durationMinutes": 60,
+#     "playerName": "Stas"
+#   }
+# }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conflict demo — same slot, exceeds capacity, returns SlotUnavailable with
+# nearest available alternatives (the optional 14-day search).
+# ─────────────────────────────────────────────────────────────────────────────
+# Run the Create mutation 6 times with the same variables → first 5 return
+# SessionPayload, 6th returns SlotUnavailable.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Update & cancel
+# ─────────────────────────────────────────────────────────────────────────────
+mutation Update($id: ID!, $input: UpdateSessionInput!) {
+  updateSession(id: $id, input: $input) {
+    __typename
+    ... on SessionPayload { session { id startTime endTime playerName } }
+    ... on SlotUnavailable { message }
+    ... on NotFound { message }
+  }
+}
+
+mutation Cancel($id: ID!) {
+  deleteSession(id: $id) {
+    __typename
+    ... on SessionDeleted { id }
+    ... on NotFound { message }
+  }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Suggest 5 nearest slots for an hour-long session starting at 10:00
+# ─────────────────────────────────────────────────────────────────────────────
+query Suggest {
+  suggestSlots(
+    arenaId: "1"
+    preferredStart: "2026-05-18T10:00:00Z"
+    durationMinutes: 60
+    withinDays: 14
+    maxResults: 5
+  ) {
+    start
+    end
+  }
+}

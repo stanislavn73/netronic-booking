@@ -1,0 +1,42 @@
+{
+  "name": "@app/api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "migrate": "tsx scripts/migrate.ts",
+    "seed": "tsx scripts/seed.ts",
+    "test": "vitest run",
+    "test:verbose": "vitest run --reporter=verbose",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@apollo/server": "^5.5.1",
+    "@as-integrations/fastify": "^3.1.0",
+    "@fastify/cors": "^10.0.0",
+    "@pothos/core": "^4.3.0",
+    "dataloader": "^2.2.2",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.36.0",
+    "fastify": "^5.3.0",
+    "graphql": "^16.11.0",
+    "graphql-scalars": "^1.23.0",
+    "pg": "^8.13.0",
+    "pg-copy-streams": "^6.0.6",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.2.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.5",
+    "@types/pg": "^8.11.10",
+    "@types/pg-copy-streams": "^1.2.5",
+    "drizzle-kit": "^0.28.0",
+    "tsx": "^4.22.0",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.1"
+  }
+}

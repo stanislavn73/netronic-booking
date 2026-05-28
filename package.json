@@ -1,0 +1,23 @@
+{
+  "name": "netronic-booking",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "test": "pnpm --filter @app/api test",
+    "e2e": "pnpm --filter @app/web e2e",
+    "e2e:ui": "pnpm --filter @app/web e2e:ui",
+    "e2e:install": "pnpm --filter @app/web e2e:install",
+    "e2e:report": "pnpm --filter @app/web e2e:report",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "db:migrate": "pnpm --filter @app/api migrate",
+    "db:seed": "pnpm --filter @app/api seed",
+    "db:reset": "pnpm db:down && docker volume rm netronic-booking_pgdata 2>/dev/null || true && pnpm db:up && sleep 3 && pnpm db:migrate && pnpm db:seed"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
