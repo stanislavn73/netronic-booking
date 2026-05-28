@@ -1,3 +1,11 @@
+/**
+ * Hand-rolled types that mirror the GraphQL schema.
+ *
+ * TODO: replace with `@graphql-codegen` output (pending task P1-6). Until then,
+ * keep this file in lockstep with `apps/api/src/graphql/schema.ts` — every
+ * server-side field addition needs a matching edit here.
+ */
+
 export interface Arena {
   id: string;
   name: string;
@@ -6,7 +14,9 @@ export interface Arena {
 export interface Session {
   id: string;
   arenaId: string;
+  /** ISO-8601 UTC instant. */
   startTime: string;
+  /** ISO-8601 UTC instant. */
   endTime: string;
   durationMinutes: number;
   playerName: string | null;
@@ -14,7 +24,9 @@ export interface Session {
 }
 
 export interface SlotSuggestion {
+  /** ISO-8601 UTC instant. */
   start: string;
+  /** ISO-8601 UTC instant. */
   end: string;
 }
 
@@ -27,4 +39,23 @@ export interface AvailabilityResult {
   maxAvailableDurationMinutes: number;
   /** ISO-8601 instant where the cap is first reached, or null. */
   fillsUpAt: string | null;
+}
+
+/** Shape of `ValidationFailed.issues[i]` from any session mutation. */
+export interface ValidationIssue {
+  field: string;
+  message: string;
+}
+
+/**
+ * SlotUnavailable payload as returned by createSession / updateSession.
+ * Mirrors the `SlotUnavailable` GraphQL type.
+ */
+export interface SlotUnavailablePayload {
+  message: string;
+  conflictingCount: number;
+  capacity: number;
+  suggestions: SlotSuggestion[];
+  fillsUpAt: string | null;
+  maxAvailableDurationMinutes: number;
 }

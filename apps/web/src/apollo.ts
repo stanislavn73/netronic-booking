@@ -1,13 +1,12 @@
-import { ApolloClient, InMemoryCache, HttpLink } from '@apollo/client';
+import { ApolloClient, HttpLink, InMemoryCache } from '@apollo/client';
 
 /**
  * GraphQL endpoint URL.
  *
  *   - Dev:  the Vite proxy in vite.config.ts forwards `/graphql` → :4000,
- *           so the default relative path Just Works without an env var.
- *   - Prod: build with `VITE_API_URL=https://api.example.com/graphql`.
- *           Netlify reads this from the site's Environment Variables and
- *           Vite inlines it at build time — there is no runtime config.
+ *           so the default relative path works without an env var.
+ *   - Prod: build with `VITE_API_URL=https://api.example.com/graphql`. Vite
+ *           inlines the value at build time — there is no runtime config.
  */
 const GRAPHQL_URI = import.meta.env.VITE_API_URL ?? '/graphql';
 
@@ -19,4 +18,11 @@ export const apollo = new ApolloClient({
       Session: { keyFields: ['id'] },
     },
   }),
+  defaultOptions: {
+    // `cache-and-network` keeps the UI responsive (shows cache instantly) while
+    // still reconciling with fresh data — appropriate for everything in this
+    // app, which is small and read-heavy. Override per-call if you need stricter.
+    watchQuery: { fetchPolicy: 'cache-and-network', nextFetchPolicy: 'cache-first' },
+    query: { fetchPolicy: 'network-only' },
+  },
 });

@@ -1,18 +1,20 @@
 import { useState } from 'react';
-import { addDays, format, parse } from 'date-fns';
-import { ArenaList } from './components/ArenaList';
-import { Timeline } from './components/Timeline';
-import { SessionModal } from './components/SessionModal';
-import type { Session } from './lib/types';
+import { ArenaList } from '@/components/ArenaList';
+import { DayNavigator } from '@/components/DayNavigator';
+import { SessionModal, type SessionModalMode } from '@/components/SessionModal';
+import { Timeline } from '@/components/Timeline';
+import type { Session } from '@/lib/types';
 
-type ModalMode =
-  | { kind: 'create'; arenaId: string; initialStart: Date }
-  | { kind: 'edit'; session: Session };
-
+/**
+ * Root composition: header (title + day navigator), sidebar (arena list),
+ * main pane (timeline or empty state), modal layer (create/edit).
+ *
+ * Holds only top-level state: selected arena id, current date, modal mode.
+ */
 export function App() {
   const [arenaId, setArenaId] = useState<string | null>(null);
   const [date, setDate] = useState<Date>(() => new Date());
-  const [modal, setModal] = useState<ModalMode | null>(null);
+  const [modal, setModal] = useState<SessionModalMode | null>(null);
 
   return (
     <div className="flex h-screen flex-col">
@@ -23,40 +25,7 @@ export function App() {
             ≤ 5 concurrent sessions per arena
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setDate(addDays(date, -1))}
-            className="rounded-md border border-zinc-700 px-2 py-1 text-sm hover:bg-zinc-800"
-          >
-            ←
-          </button>
-          <input
-            type="date"
-            value={format(date, 'yyyy-MM-dd')}
-            onChange={(e) => {
-              // `new Date("2026-05-27")` parses as UTC midnight — on a
-              // non-UTC machine that's a different local day than the user
-              // picked. date-fns `parse` interprets the string as LOCAL,
-              // which is what every other piece of date handling in the app
-              // assumes.
-              if (!e.target.value) return;
-              setDate(parse(e.target.value, 'yyyy-MM-dd', new Date()));
-            }}
-            className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm"
-          />
-          <button
-            onClick={() => setDate(addDays(date, 1))}
-            className="rounded-md border border-zinc-700 px-2 py-1 text-sm hover:bg-zinc-800"
-          >
-            →
-          </button>
-          <button
-            onClick={() => setDate(new Date())}
-            className="rounded-md border border-zinc-700 px-2 py-1 text-sm hover:bg-zinc-800"
-          >
-            Today
-          </button>
-        </div>
+        <DayNavigator date={date} onChange={setDate} />
       </header>
       <div className="flex flex-1 overflow-hidden">
         <ArenaList selectedId={arenaId} onSelect={setArenaId} />
@@ -64,7 +33,7 @@ export function App() {
           <Timeline
             arenaId={arenaId}
             date={date}
-            onEditSession={(s) => setModal({ kind: 'edit', session: s })}
+            onEditSession={(s: Session) => setModal({ kind: 'edit', session: s })}
             onClickEmpty={(initialStart) =>
               setModal({ kind: 'create', arenaId, initialStart })
             }

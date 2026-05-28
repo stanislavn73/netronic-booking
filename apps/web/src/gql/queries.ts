@@ -1,16 +1,8 @@
 import { gql } from '@apollo/client';
+import { SESSION_FIELDS, SLOT_UNAVAILABLE_FIELDS } from '@/gql/fragments';
 
-export const SESSION_FIELDS = gql`
-  fragment SessionFields on Session {
-    id
-    arenaId
-    startTime
-    endTime
-    durationMinutes
-    playerName
-    status
-  }
-`;
+// Re-export so historical imports of `SESSION_FIELDS` from this file still work.
+export { SESSION_FIELDS, SLOT_UNAVAILABLE_FIELDS };
 
 export const ARENAS_QUERY = gql`
   query Arenas($search: String) {
@@ -22,12 +14,9 @@ export const ARENAS_QUERY = gql`
 `;
 
 /**
- * Probes the arena for a proposed start. Returns the post-fix peak concurrent
- * count, the largest duration that would actually fit at this start without
- * exceeding the cap, and the first instant the cap is reached (if any).
- *
- * The modal calls this once on open to set a sensible default duration and
- * surface a "fits up to N min" helper next to the duration field.
+ * Probes occupancy at a proposed start. Returns peak-concurrent count, the
+ * largest duration that would fit at this start, and the first instant the
+ * cap is reached (if any). Used by the modal's "Fits up to N min" helper.
  */
 export const CHECK_AVAILABILITY = gql`
   query CheckAvailability(
@@ -60,6 +49,7 @@ export const SESSIONS_BY_ARENA = gql`
 
 export const CREATE_SESSION = gql`
   ${SESSION_FIELDS}
+  ${SLOT_UNAVAILABLE_FIELDS}
   mutation CreateSession($input: CreateSessionInput!) {
     createSession(input: $input) {
       __typename
@@ -69,15 +59,7 @@ export const CREATE_SESSION = gql`
         }
       }
       ... on SlotUnavailable {
-        message
-        conflictingCount
-        capacity
-        suggestions {
-          start
-          end
-        }
-        fillsUpAt
-        maxAvailableDurationMinutes
+        ...SlotUnavailableFields
       }
       ... on ValidationFailed {
         issues {
@@ -94,6 +76,7 @@ export const CREATE_SESSION = gql`
 
 export const UPDATE_SESSION = gql`
   ${SESSION_FIELDS}
+  ${SLOT_UNAVAILABLE_FIELDS}
   mutation UpdateSession($id: ID!, $input: UpdateSessionInput!) {
     updateSession(id: $id, input: $input) {
       __typename
@@ -103,15 +86,7 @@ export const UPDATE_SESSION = gql`
         }
       }
       ... on SlotUnavailable {
-        message
-        conflictingCount
-        capacity
-        suggestions {
-          start
-          end
-        }
-        fillsUpAt
-        maxAvailableDurationMinutes
+        ...SlotUnavailableFields
       }
       ... on ValidationFailed {
         issues {
