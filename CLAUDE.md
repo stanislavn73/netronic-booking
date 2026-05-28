@@ -15,10 +15,18 @@ under `.claude/`.
 apps/
   api/                 # Fastify + Apollo + Pothos + Drizzle + Postgres
     src/
-      db/              # Drizzle schema, raw SQL migrations, range helpers
-      services/        # Domain logic — cap-check + slot suggestion
-      graphql/         # Pothos schema, loaders, builder
-      env.ts logger.ts index.ts
+      db/              # schema, range, migrations, sweep (sweep-line),
+                       # sessions.repo (SQL access), transactions
+                       # (withTransaction / withArenaLock)
+      services/        # errors (typed-meta DomainError<C>),
+                       # validation (assertValidDuration),
+                       # sessions (orchestration only — repo+sweep+lock),
+                       # slots (suggestSlots), availability
+                       # (buildSlotUnavailable payload)
+      graphql/         # builder, loaders, schema (thin),
+                       # error-mapping (mapMutationError),
+                       # resolve-type (union discriminant)
+      env.ts logger.ts index.ts time.ts (ms / minutes / toMinutes)
     scripts/           # migrate, seed (COPY FROM STDIN)
     tests/             # vitest: overlap unit, race integration, etc.
   web/

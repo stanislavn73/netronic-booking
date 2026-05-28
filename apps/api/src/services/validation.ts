@@ -1,13 +1,14 @@
 import { z } from 'zod';
+import { ms, minutes } from '../time.js';
+import { DomainError } from './errors.js';
 
 export const ARENA_CAPACITY = 5;
 export const MIN_DURATION_MIN = 5;
 export const MAX_DURATION_MIN = 24 * 60;
 
 /**
- * Input schema for create/update. We accept either explicit endTime or
- * durationMinutes — the spec calls this out. Service layer normalizes
- * to a [start, end) range.
+ * Input schema for create. Accepts either `endTime` or `durationMinutes`;
+ * the service-layer normalizer turns either into a `[start, end)` window.
  */
 export const SessionInputSchema = z
   .object({
@@ -31,15 +32,35 @@ export interface NormalizedSession {
   playerName?: string;
 }
 
+/**
+ * Assert that `[start, end)` lies within the spec's duration bounds.
+ * @throws DomainError<'INVALID_DURATION'> if too short or too long.
+ */
+export function assertValidDuration(start: Date, end: Date): void {
+  const durMs = end.getTime() - start.getTime();
+  if (durMs < minutes(MIN_DURATION_MIN)) {
+    throw new DomainError(
+      'INVALID_DURATION',
+      `Duration must be ≥ ${MIN_DURATION_MIN} minutes`,
+      { durationMinutes: durMs / ms.minute },
+    );
+  }
+  if (durMs > minutes(MAX_DURATION_MIN)) {
+    throw new DomainError(
+      'INVALID_DURATION',
+      `Duration must be ≤ ${MAX_DURATION_MIN / 60} hours`,
+      { durationMinutes: durMs / ms.minute },
+    );
+  }
+}
+
+/**
+ * Normalize a {@link SessionInput} to `[start, end)`, deriving `end` from
+ * `durationMinutes` when `endTime` is absent.
+ */
 export function normalizeInput(input: SessionInput): NormalizedSession {
   const start = input.startTime;
-  const end = input.endTime ?? new Date(start.getTime() + (input.durationMinutes ?? 0) * 60_000);
-  const durMs = end.getTime() - start.getTime();
-  if (durMs < MIN_DURATION_MIN * 60_000) {
-    throw new Error(`Duration must be ≥ ${MIN_DURATION_MIN} minutes`);
-  }
-  if (durMs > MAX_DURATION_MIN * 60_000) {
-    throw new Error(`Duration must be ≤ ${MAX_DURATION_MIN / 60} hours`);
-  }
+  const end = input.endTime ?? new Date(start.getTime() + minutes(input.durationMinutes ?? 0));
+  assertValidDuration(start, end);
   return { arenaId: input.arenaId, start, end, playerName: input.playerName };
 }

@@ -1,11 +1,8 @@
 /**
- * GraphQL schema (Pothos, code-first).
- *
- * Mutation results are discriminated unions, not `throw`. The client must
- * inline-fragment each variant — slot conflicts are a normal business state,
- * not an exception.
+ * GraphQL schema (Pothos, code-first). Mutation results are discriminated
+ * unions — slot conflicts are normal business state, not exceptions. Error
+ * translation lives in `./error-mapping.ts`.
  */
-import { ZodError } from 'zod';
 import { builder } from './builder.js';
 import {
   ARENA_CAPACITY,
@@ -23,10 +20,12 @@ import {
   type SessionRecord,
 } from '../services/sessions.js';
 import { suggestSlots } from '../services/slots.js';
-import { DomainError } from '../services/errors.js';
+import { mapMutationError } from './error-mapping.js';
+import { mutationResultTypeName } from './resolve-type.js';
+import { ms, minutes } from '../time.js';
 
 // =============================================================================
-// Types
+// Object types
 // =============================================================================
 
 interface ArenaT {
@@ -65,7 +64,7 @@ SessionRef.implement({
     startTime: t.expose('startTime', { type: 'DateTime' }),
     endTime: t.expose('endTime', { type: 'DateTime' }),
     durationMinutes: t.int({
-      resolve: (s) => Math.round((s.endTime.getTime() - s.startTime.getTime()) / 60_000),
+      resolve: (s) => Math.round((s.endTime.getTime() - s.startTime.getTime()) / ms.minute),
     }),
     playerName: t.exposeString('playerName', { nullable: true }),
     status: t.field({ type: SessionStatusEnum, resolve: (s) => s.status }),
@@ -93,7 +92,7 @@ ValidationIssueRef.implement({
 });
 
 // =============================================================================
-// Result union types — discriminated, exhaustive client handling.
+// Result variants
 // =============================================================================
 
 const SessionPayloadRef = builder.objectRef<{ session: SessionRecord }>('SessionPayload');
@@ -108,9 +107,7 @@ interface SlotUnavailableT {
   conflictingCount: number;
   capacity: number;
   suggestions: Array<{ start: Date; end: Date }>;
-  /** The first instant inside the proposal where the cap is reached. */
   fillsUpAt: Date | null;
-  /** Max duration (minutes) that would fit at the proposed start. */
   maxAvailableDurationMinutes: number;
 }
 const SlotUnavailableRef = builder.objectRef<SlotUnavailableT>('SlotUnavailable');
@@ -140,40 +137,22 @@ ValidationFailedRef.implement({
 
 const NotFoundRef = builder.objectRef<{ message: string }>('NotFound');
 NotFoundRef.implement({
-  fields: (t) => ({
-    message: t.exposeString('message'),
-  }),
+  fields: (t) => ({ message: t.exposeString('message') }),
 });
 
 const SessionDeletedRef = builder.objectRef<{ id: number }>('SessionDeleted');
 SessionDeletedRef.implement({
-  fields: (t) => ({
-    id: t.exposeID('id'),
-  }),
+  fields: (t) => ({ id: t.exposeID('id') }),
 });
 
 const CreateSessionResult = builder.unionType('CreateSessionResult', {
   types: [SessionPayloadRef, SlotUnavailableRef, ValidationFailedRef, NotFoundRef],
-  resolveType: (v) =>
-    'session' in v
-      ? 'SessionPayload'
-      : 'issues' in v
-        ? 'ValidationFailed'
-        : 'suggestions' in v
-          ? 'SlotUnavailable'
-          : 'NotFound',
+  resolveType: mutationResultTypeName,
 });
 
 const UpdateSessionResult = builder.unionType('UpdateSessionResult', {
   types: [SessionPayloadRef, SlotUnavailableRef, ValidationFailedRef, NotFoundRef],
-  resolveType: (v) =>
-    'session' in v
-      ? 'SessionPayload'
-      : 'issues' in v
-        ? 'ValidationFailed'
-        : 'suggestions' in v
-          ? 'SlotUnavailable'
-          : 'NotFound',
+  resolveType: mutationResultTypeName,
 });
 
 const DeleteSessionResult = builder.unionType('DeleteSessionResult', {
@@ -193,9 +172,7 @@ AvailabilityResultRef.implement({
     available: t.exposeBoolean('available'),
     conflictingCount: t.exposeInt('conflictingCount'),
     capacity: t.exposeInt('capacity'),
-    /** How long a proposal at this start can run without exceeding the cap. */
     maxAvailableDurationMinutes: t.exposeInt('maxAvailableDurationMinutes'),
-    /** When the cap is first reached inside the proposed window, if at all. */
     fillsUpAt: t.field({
       type: 'DateTime',
       nullable: true,
@@ -226,75 +203,6 @@ const UpdateSessionInput = builder.inputType('UpdateSessionInput', {
     playerName: t.string({ required: false }),
   }),
 });
-
-// =============================================================================
-// Helpers — convert domain errors / Zod errors into union variants.
-// =============================================================================
-
-function zodIssues(err: ZodError) {
-  return {
-    issues: err.issues.map((i) => ({ field: i.path.join('.') || '_root', message: i.message })),
-  };
-}
-
-/**
- * Build a SlotUnavailable variant with nearest-available suggestions sized to
- * the SAME duration the caller asked for.
- *
- * Previously this hard-coded a 1-hour fallback regardless of the requested
- * duration. A user trying to book a 3-hour session would see suggestion chips
- * for 1-hour gaps and still hit SLOT_UNAVAILABLE after clicking one — the
- * "nearest available slots" promise was a lie. The duration MUST be the
- * caller's requested window length.
- */
-async function unavailableWithSuggestions(args: {
-  arenaId: number;
-  start: Date;
-  end: Date;
-  conflictingCount: number;
-  fillsUpAt: Date | null;
-  maxAvailableDurationMinutes: number;
-}): Promise<SlotUnavailableT> {
-  const durationMs = args.end.getTime() - args.start.getTime();
-  const suggestions = await suggestSlots({
-    arenaId: args.arenaId,
-    preferredStart: args.start,
-    durationMs,
-  });
-  // Human-friendly message — service already produced a more precise one,
-  // but we cap it in case the client only looks at `message`.
-  const message = args.fillsUpAt
-    ? `Slot fills up at ${args.fillsUpAt.toISOString()} — your proposal would exceed ${ARENA_CAPACITY} concurrent`
-    : `Slot unavailable — ${args.conflictingCount} of ${ARENA_CAPACITY} concurrent sessions already booked`;
-  return {
-    message,
-    conflictingCount: args.conflictingCount,
-    capacity: ARENA_CAPACITY,
-    suggestions,
-    fillsUpAt: args.fillsUpAt,
-    maxAvailableDurationMinutes: args.maxAvailableDurationMinutes,
-  };
-}
-
-/**
- * Derive [start, end) from a CreateSessionInput before the service runs.
- *
- * The service does the same derivation under Zod, but throws on conflict
- * before returning the parsed end. We replay it here purely so the
- * SlotUnavailable variant can size its suggestions correctly. Returns null
- * for invalid inputs — the service's ValidationFailed will fire first.
- */
-function deriveCreateEnd(input: {
-  startTime: Date;
-  endTime?: Date | null;
-  durationMinutes?: number | null;
-}): Date | null {
-  if (input.endTime) return input.endTime;
-  if (input.durationMinutes != null) {
-    return new Date(input.startTime.getTime() + input.durationMinutes * 60_000);
-  }
-  return null;
-}
 
 // =============================================================================
 // Queries
@@ -345,8 +253,8 @@ builder.queryType({
         startTime: t.arg({ type: 'DateTime', required: true }),
         durationMinutes: t.arg.int({ required: true }),
       },
-      resolve: async (_p, { arenaId, startTime, durationMinutes }) => {
-        const end = new Date(startTime.getTime() + durationMinutes * 60_000);
+      resolve: (_p, { arenaId, startTime, durationMinutes }) => {
+        const end = new Date(startTime.getTime() + minutes(durationMinutes));
         return checkAvailability(Number(arenaId), startTime, end);
       },
     }),
@@ -364,8 +272,8 @@ builder.queryType({
         suggestSlots({
           arenaId: Number(arenaId),
           preferredStart,
-          durationMs: durationMinutes * 60_000,
-          horizonMs: (withinDays ?? 14) * 24 * 3600 * 1000,
+          durationMs: minutes(durationMinutes),
+          horizonMs: (withinDays ?? 14) * ms.day,
           maxResults: maxResults ?? 5,
         }),
     }),
@@ -392,46 +300,7 @@ builder.mutationType({
           });
           return { session };
         } catch (err) {
-          if (err instanceof ZodError) return zodIssues(err);
-          if (err instanceof DomainError) {
-            if (err.code === 'ARENA_NOT_FOUND' || err.code === 'SESSION_NOT_FOUND') {
-              return { message: err.message };
-            }
-            if (err.code === 'SLOT_UNAVAILABLE') {
-              // Prefer the actual normalized window from the service (always
-              // populated on SLOT_UNAVAILABLE); fall back to deriving from the
-              // raw input for forward-compatibility if a future code path
-              // forgets to include them.
-              const meta = err.meta as {
-                start?: Date;
-                end?: Date;
-                conflictingCount?: number;
-                fillsUpAt?: Date | null;
-                maxAvailableDurationMinutes?: number;
-              };
-              const start = meta.start ?? input.startTime;
-              const end =
-                meta.end ??
-                deriveCreateEnd({
-                  startTime: input.startTime,
-                  endTime: input.endTime,
-                  durationMinutes: input.durationMinutes,
-                }) ??
-                // Last-resort 1h window — only reached if neither service nor
-                // input gave us a duration. Logged so it's visible.
-                new Date(start.getTime() + 60 * 60_000);
-              return unavailableWithSuggestions({
-                arenaId: Number(input.arenaId),
-                start,
-                end,
-                conflictingCount: Number(meta.conflictingCount ?? 0),
-                fillsUpAt: meta.fillsUpAt ?? null,
-                maxAvailableDurationMinutes: Number(meta.maxAvailableDurationMinutes ?? 0),
-              });
-            }
-            return { issues: [{ field: '_root', message: err.message }] };
-          }
-          throw err;
+          return mapMutationError(err);
         }
       },
     }),
@@ -448,39 +317,11 @@ builder.mutationType({
             startTime: input.startTime ?? undefined,
             endTime: input.endTime ?? undefined,
             durationMinutes: input.durationMinutes ?? undefined,
-            // Null/string here means "explicitly set". Undefined means "untouched".
-            // Pothos passes `null` for absent optional fields, so callers must send
-            // playerName explicitly if they want to change it (matches UI behavior).
             playerName: input.playerName,
           });
           return { session };
         } catch (err) {
-          if (err instanceof ZodError) return zodIssues(err);
-          if (err instanceof DomainError) {
-            if (err.code === 'SESSION_NOT_FOUND' || err.code === 'ARENA_NOT_FOUND') {
-              return { message: err.message };
-            }
-            if (err.code === 'SLOT_UNAVAILABLE') {
-              const meta = err.meta as {
-                arenaId: number;
-                start: Date;
-                end: Date;
-                conflictingCount: number;
-                fillsUpAt?: Date | null;
-                maxAvailableDurationMinutes?: number;
-              };
-              return unavailableWithSuggestions({
-                arenaId: meta.arenaId,
-                start: meta.start,
-                end: meta.end,
-                conflictingCount: meta.conflictingCount,
-                fillsUpAt: meta.fillsUpAt ?? null,
-                maxAvailableDurationMinutes: Number(meta.maxAvailableDurationMinutes ?? 0),
-              });
-            }
-            return { issues: [{ field: '_root', message: err.message }] };
-          }
-          throw err;
+          return mapMutationError(err);
         }
       },
     }),
@@ -492,9 +333,8 @@ builder.mutationType({
         try {
           return await deleteSession(Number(id));
         } catch (err) {
-          if (err instanceof DomainError && err.code === 'SESSION_NOT_FOUND') {
-            return { message: err.message };
-          }
+          const variant = await mapMutationError(err);
+          if ('message' in variant) return variant;
           throw err;
         }
       },

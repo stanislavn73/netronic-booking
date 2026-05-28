@@ -51,14 +51,48 @@ Pure helpers. No React, no Apollo, no DOM.
 - `queries.ts` — every query/mutation document. Single file is OK at
   current size; split into per-domain files if it grows past 300 LOC.
 
+### `apps/api/src/db/`
+SQL access + Postgres primitives. No business rules.
+
+- `sessions.repo.ts` — every SQL query against `sessions`/`arenas`. Column
+  list and overlap-WHERE live here once. Functions take `Pool | PoolClient`.
+- `sweep.ts` — pure sweep-line over `Interval[]`: `buildEvents`,
+  `sweepConcurrency`, `maxRoomDurationMs`. Used by services AND by tests.
+- `transactions.ts` — `withTransaction`, `lockArena`, `withArenaLock`.
+  Compose them; don't reinvent.
+- `range.ts` — tstzrange `[)` (de)serialization.
+- `schema.ts` — Drizzle typing (mostly opaque); DDL lives in `migrations/`.
+
 ### `apps/api/src/services/`
-Domain logic, framework-free. Functions take a `PoolClient`, return data
-or throw `DomainError`. Resolvers translate `DomainError` to GraphQL
-union variants — they never invent business rules.
+Domain logic, framework-free. Imports from `db/` only. Throws `DomainError`,
+never plain `Error`.
+
+- `errors.ts` — `DomainError<C>` with typed `meta` per code via
+  `DomainErrorMetaByCode`. Use `err.is('SLOT_UNAVAILABLE')` to narrow.
+- `validation.ts` — single source for duration bounds via
+  `assertValidDuration(start, end)`. Both `createSession` and
+  `updateSession` go through it.
+- `sessions.ts` — orchestration only: validate → lock → probe → write.
+  Never inline SQL or event-sweep math; call the repo + sweep helpers.
+- `slots.ts` — `suggestSlots` on top of `buildEvents`.
+- `availability.ts` — `buildSlotUnavailable` payload (suggestions sized to
+  the caller's requested duration).
 
 ### `apps/api/src/graphql/`
 Pothos schema (code-first). Resolvers are thin: parse input → call a
-service → map errors to result variants.
+service → call `mapMutationError` on throws.
+
+- `schema.ts` — types, refs, unions, query/mutation field definitions. No
+  domain logic.
+- `error-mapping.ts` — `mapMutationError(err)`: Zod/DomainError → union
+  variant. Re-throws unknown errors so Apollo surfaces them.
+- `resolve-type.ts` — shared `mutationResultTypeName` discriminant. If you
+  add a new variant shape, update it once.
+- `builder.ts`, `loaders.ts` — Pothos builder, per-request DataLoader.
+
+### `apps/api/src/time.ts`
+`ms.{second,minute,hour,day}` + `minutes(n)`, `toMinutes(ms)`. No inline
+`60_000` or `24 * 3600 * 1000` anywhere else.
 
 ---
 
@@ -164,8 +198,11 @@ is doing the extraction work, not adding a feature.
 The spec rule "at any moment in time the count of active sessions shall
 not exceed N" requires **max-concurrent**, not total-overlapping.
 
-- **Server**: `apps/api/src/services/sessions.ts → maxConcurrentDuring`.
-  Returns `{ max, firstFillAt }`. The cap check is `probe.max >= ARENA_CAPACITY`.
+- **Server**: `apps/api/src/services/sessions.ts → probeConcurrency`
+  (orchestration) delegates to `apps/api/src/db/sweep.ts → sweepConcurrency`
+  (pure). Returns `{ max, firstFillAt }`. Cap check is
+  `probe.max >= ARENA_CAPACITY`. There is only one sweep implementation —
+  do NOT inline another.
 - **Client (display only)**: `apps/web/src/lib/concurrency.ts →
   hourlyPeakConcurrent`. Same algorithm, mirrored for visual density chips.
 
