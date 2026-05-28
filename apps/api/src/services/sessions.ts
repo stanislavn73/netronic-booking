@@ -169,10 +169,18 @@ export async function checkAvailability(
 
 /**
  * Create an active session for an arena.
+ *
+ * Tries an atomic-pick-a-lane INSERT first. If 0 rows return, the arena
+ * is at capacity for the requested window — we then run a concurrency
+ * probe purely to populate `fillsUpAt` / `maxAvailableDurationMinutes`
+ * on the SLOT_UNAVAILABLE meta. The probe is a separate read; the
+ * advisory lock keeps the picture coherent until {@link 0003_lanes_constraints.sql}
+ * adds the EXCLUDE constraint and the lock becomes redundant.
+ *
  * @throws DomainError<'VALIDATION_FAILED'> on Zod parse failure (re-thrown ZodError).
  * @throws DomainError<'INVALID_DURATION'> if the derived window violates bounds.
  * @throws DomainError<'ARENA_NOT_FOUND'> if `input.arenaId` doesn't exist.
- * @throws DomainError<'SLOT_UNAVAILABLE'> if the window would exceed capacity.
+ * @throws DomainError<'SLOT_UNAVAILABLE'> if no lane fits the requested window.
  */
 export async function createSession(input: SessionInput): Promise<SessionRecord> {
   const norm = normalizeInput(SessionInputSchema.parse(input));
@@ -182,24 +190,25 @@ export async function createSession(input: SessionInput): Promise<SessionRecord>
     });
   }
   return withArenaLock(norm.arenaId, async (client) => {
-    const window: Window = { start: norm.start, end: norm.end };
-    const probe = await probeConcurrency(client, norm.arenaId, window);
-    if (probe.max >= ARENA_CAPACITY) {
-      const maxAvailMs = await maxAvailableDurationMs(client, norm.arenaId, norm.start);
-      throw slotUnavailable({
-        arenaId: norm.arenaId,
-        start: norm.start,
-        end: norm.end,
-        probe,
-        maxAvailableDurationMinutes: toMinutes(maxAvailMs),
-        context: 'create',
-      });
-    }
-    return insertActiveSession(client, {
+    const inserted = await insertActiveSession(client, {
       arenaId: norm.arenaId,
       start: norm.start,
       end: norm.end,
       playerName: norm.playerName ?? null,
+    });
+    if (inserted) return inserted;
+
+    // Cap reached. Probe for the rich meta so the UI can suggest alternatives.
+    const window: Window = { start: norm.start, end: norm.end };
+    const probe = await probeConcurrency(client, norm.arenaId, window);
+    const maxAvailMs = await maxAvailableDurationMs(client, norm.arenaId, norm.start);
+    throw slotUnavailable({
+      arenaId: norm.arenaId,
+      start: norm.start,
+      end: norm.end,
+      probe,
+      maxAvailableDurationMinutes: toMinutes(maxAvailMs),
+      context: 'create',
     });
   });
 }
@@ -242,31 +251,35 @@ export async function updateSession(
     if (!locked) {
       throw new DomainError('SESSION_NOT_FOUND', `Session ${id} not found`, { sessionId: id });
     }
-    const window: Window = { start, end };
-    const probe = await probeConcurrency(client, locked.arenaId, window, id);
-    if (probe.max >= ARENA_CAPACITY) {
-      const maxAvailMs = await maxAvailableDurationMs(
-        client,
-        locked.arenaId,
-        start,
-        undefined,
-        id,
-      );
-      throw slotUnavailable({
-        arenaId: locked.arenaId,
-        start,
-        end,
-        probe,
-        maxAvailableDurationMinutes: toMinutes(maxAvailMs),
-        context: 'update',
-      });
-    }
     const playerName = input.playerName === undefined ? locked.playerName : input.playerName;
-    const updated = await updateSessionRow(client, id, { start, end, playerName });
-    if (!updated) {
+    const result = await updateSessionRow(client, id, {
+      arenaId: locked.arenaId,
+      start,
+      end,
+      playerName,
+    });
+    if (result.kind === 'updated') return result.row;
+    if (result.kind === 'not_found') {
       throw new DomainError('SESSION_NOT_FOUND', `Session ${id} not found`, { sessionId: id });
     }
-    return updated;
+    // Cap reached at the new window — probe for rich meta.
+    const window: Window = { start, end };
+    const probe = await probeConcurrency(client, locked.arenaId, window, id);
+    const maxAvailMs = await maxAvailableDurationMs(
+      client,
+      locked.arenaId,
+      start,
+      undefined,
+      id,
+    );
+    throw slotUnavailable({
+      arenaId: locked.arenaId,
+      start,
+      end,
+      probe,
+      maxAvailableDurationMinutes: toMinutes(maxAvailMs),
+      context: 'update',
+    });
   });
 }
 

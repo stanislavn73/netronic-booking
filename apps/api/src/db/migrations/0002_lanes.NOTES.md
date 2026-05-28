@@ -1,130 +1,124 @@
-# 0002_lanes — design notes
+# 0002_lanes — phased rollout
 
-Review checklist before approving `sessions.ts` rewrite.
+The original single-shot 0002 (column + backfill + EXCLUDE in one migration)
+proved unsafe at production scale on Render's free tier — the backfill
+required a multi-million-row PL/pgSQL UPDATE inside one transaction, far
+past the startup health-check window. The container exited, Render kept
+the previous deploy serving traffic, schema never changed.
 
-## Why
+This is the safer phased version.
 
-The advisory lock in `withArenaLock` was the only thing keeping the 5-cap
-honest across concurrent writes. It works but pays:
+## Step 1 — `0002_lanes.sql` (lands in THIS PR)
 
-- Round-trip per `createSession` to take and release the lock.
-- All writes for one arena serialize on one Postgres backend regardless of
-  whether they'd actually conflict.
-- The cap rule is enforced **only** in application code — schema does not
-  prevent a buggy migration / direct INSERT from violating it.
+DDL only. Adds `lane SMALLINT` (nullable). Idempotent.
 
-EXCLUDE constraints push the enforcement into Postgres, so the DB is the
-source of truth. The advisory lock disappears.
+Trivially fast — `ALTER TABLE` with no rewrite. Safe on any table size.
 
-## What the migration does
+After this step:
+- Schema has the `lane` column. No constraint yet.
+- Existing rows have `lane = NULL`.
+- New rows from `insertActiveSession` (rewritten in this PR) write a lane
+  via the atomic-pick-a-lane INSERT statement.
+- `withArenaLock` is still in place — it's the only race protection until
+  the EXCLUDE constraint exists.
 
-1. `ADD COLUMN lane SMALLINT` (nullable initially so backfill can write it).
-2. Backfill via a `DO $$ … $$;` block: greedy lane assignment per arena,
-   sessions ordered by `lower(during)`. Each session takes the first lane
-   whose previous end is `<= start`. Fails loudly if any row can't fit.
-3. `ALTER COLUMN lane SET NOT NULL`, `CHECK (lane BETWEEN 1 AND 5)`.
-4. `EXCLUDE USING GIST (arena_id WITH =, lane WITH =, during WITH &&)
-   WHERE (status = 'active')` — the schema-level cap.
-5. Drop the now-redundant `sessions_arena_during_gist` partial index.
+## Step 2 — `pnpm --filter @app/api backfill:lanes` (manual, post-deploy)
 
-## Backfill characteristics
+Greedy lane assignment for old rows that have `lane = NULL`. Run from your
+laptop with `DATABASE_URL` pointing at production:
 
-- O(N) per arena. PL/pgSQL row-by-row UPDATE → slow at the 100M-row seed
-  scale (~10 min on commodity hardware). For real prod with that volume
-  you'd want a chunked, resumable script; for our dev/seed sizes it's
-  fine.
-- Existing data **must** already satisfy the cap (seed guarantees this).
-  If a real-world dataset violated it, the migration raises and rolls
-  back — preferable to silent data loss.
-- Cancelled rows get `lane = 1` arbitrarily; the EXCLUDE `WHERE
-  status = 'active'` makes them invisible to the constraint.
-
-## App code changes that follow (NOT in this migration)
-
-### `db/sessions.repo.ts`
-
-`insertActiveSession` becomes an atomic-pick-a-lane statement:
-
-```sql
-INSERT INTO sessions (arena_id, lane, during, player_name, status)
-SELECT $1, lane, $2::tstzrange, $3, 'active'
-FROM generate_series(1, 5) AS lane
-WHERE NOT EXISTS (
-  SELECT 1 FROM sessions s
-  WHERE s.arena_id = $1 AND s.lane = lane
-    AND s.status = 'active' AND s.during && $2::tstzrange
-)
-ORDER BY lane
-LIMIT 1
-RETURNING <SESSION_COLS>;
+```bash
+DATABASE_URL='postgres://…' pnpm --filter @app/api backfill:lanes
 ```
 
-- 0 rows returned → cap reached → caller throws `SLOT_UNAVAILABLE`.
-- 1 row returned → success.
-- `23P03` (exclusion_violation) on this exact constraint → race; another
-  txn took the lane between our SELECT and our INSERT — caller retries
-  the whole INSERT. After 5 consecutive 23P03s the arena is genuinely
-  full → throw `SLOT_UNAVAILABLE`.
+Properties:
+- Streams arenas one at a time, fetches each arena's NULL-lane sessions in
+  one query, computes lanes in JS, writes them back in 5000-row chunks via
+  a single `UPDATE … FROM (VALUES …)` per chunk.
+- Resumable: only touches `lane IS NULL`. Crash mid-flight → re-run picks
+  up where it left off.
+- Idempotent: re-running on a fully-backfilled DB processes 0 rows.
+- Fails loudly if any arena exceeds 5 concurrent at any instant (existing
+  data violates the spec) — step 3 will then be unsafe.
 
-`updateSessionRow` gets the same treatment when `(start, end)` changes:
-re-run the pick-a-lane logic, set `lane` to the new pick.
+Estimated runtime on the seed-scale dataset (50 arenas × ~2M rows):
+~3–8 minutes against Neon.
 
-### `services/sessions.ts`
+## Step 3 — `0003_lane_constraints.sql` (separate PR, after backfill verified)
 
-- `createSession`: drop `withArenaLock`. Wrap the INSERT in a retry loop
-  catching `error.code === '23P03' && error.constraint ===
-  'sessions_no_lane_overlap'`. Probe for `fillsUpAt` and
-  `maxAvailableDurationMinutes` only on the final SLOT_UNAVAILABLE path so
-  the happy path is one round-trip.
-- `updateSession`: same retry loop. The within-lock re-read goes away.
-- `checkAvailability`: no change — it's read-only, no lock needed today.
-- `probeConcurrency` and `maxAvailableDurationMs` stay; they're still
-  needed for `checkAvailability` and for the meta on SLOT_UNAVAILABLE.
+```sql
+ALTER TABLE sessions
+  ALTER COLUMN lane SET NOT NULL,
+  ADD CONSTRAINT sessions_lane_in_range CHECK (lane BETWEEN 1 AND 5),
+  ADD CONSTRAINT sessions_no_lane_overlap
+    EXCLUDE USING GIST (arena_id WITH =, lane WITH =, during WITH &&)
+    WHERE (status = 'active');
 
-### `db/transactions.ts`
+DROP INDEX IF EXISTS sessions_arena_during_gist;
+```
 
-- `withTransaction` stays (still used for multi-statement reads, future
-  bulk inserts).
-- `withArenaLock` and `lockArena` become unused. Delete or keep for
-  future ad-hoc serialization? **Recommend: delete** — keeping unused
-  primitives invites accidental misuse.
+For multi-million-row tables, the `EXCLUDE` constraint build can take a
+while. Prefer:
 
-### Tests
+```sql
+CREATE INDEX CONCURRENTLY sessions_no_lane_overlap_idx
+  ON sessions USING GIST (arena_id, lane, during)
+  WHERE status = 'active';
+
+ALTER TABLE sessions
+  ADD CONSTRAINT sessions_no_lane_overlap
+    EXCLUDE USING GIST (arena_id WITH =, lane WITH =, during WITH &&)
+    WHERE (status = 'active')
+    USING INDEX sessions_no_lane_overlap_idx;
+```
+
+But `CREATE INDEX CONCURRENTLY` cannot run inside a transaction — the
+current `scripts/migrate.ts` wraps every file in BEGIN/COMMIT. Either:
+  a) Run the CONCURRENTLY step manually via psql, then commit a
+     migration that only does the `ADD CONSTRAINT … USING INDEX` part; or
+  b) Tolerate the brief table lock from a non-concurrent index build —
+     acceptable during a known-low-traffic window.
+
+## Step 4 — drop `withArenaLock` from `sessions.ts` (with step 3 or just after)
+
+Once EXCLUDE is in place the lock is redundant. Replace with a 23P03
+retry loop in the INSERT/UPDATE path:
+
+```ts
+const MAX_RETRIES = 5;
+for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+  try {
+    return await insertActiveSession(pool, …);  // pool, not lock
+  } catch (e) {
+    if (isExclusionViolation(e, 'sessions_no_lane_overlap')) continue;
+    throw e;
+  }
+}
+throw slotUnavailable(…);
+```
+
+Where `isExclusionViolation` matches `error.code === '23P03'` and
+`error.constraint === 'sessions_no_lane_overlap'`.
+
+## Tests
 
 - `tests/race.test.ts`:
-  - "exactly 5 of 20 concurrent identical-slot creates succeed" — passes
-    unchanged. EXCLUDE serializes them at the DB.
-  - "updateSession is serialized" — passes; same EXCLUDE machinery.
-  - "max-concurrent not total-touched (8-of-5 regression)" — still
-    relevant for `checkAvailability` and the SLOT_UNAVAILABLE meta. Keep.
-  - "touching is not overlap (5 ending + 5 starting at 11:00)" — passes;
-    same tstzrange `&&` semantics.
+  - "5 of 20 concurrent identical creates succeed" — passes after step 1
+    via the advisory lock; after step 4 it passes via EXCLUDE.
+  - "updateSession serialized" — same.
+  - "max-concurrent regression" — still relevant because `probeConcurrency`
+    is still called to populate the SLOT_UNAVAILABLE meta.
+  - "touching is not overlap" — unchanged.
 - `tests/overlap.test.ts` — unchanged.
-- Add `tests/lane-assign.test.ts` (integration) — assert that 5 concurrent
-  identical creates produce sessions with lane = 1..5 (not necessarily in
-  order, but the set must be {1,2,3,4,5}).
-- Add `tests/lane-retry.test.ts` — mock the first INSERT to throw 23P03,
-  assert retry path succeeds with a different lane.
+- Add `tests/lane-assign.test.ts` after step 3 — confirm 5 simultaneous
+  successful creates produce lanes {1,2,3,4,5}.
 
-## Rollout
+## Open question — exposing `lane` to the UI
 
-1. Land migration + repo + service changes in **one PR**. EXCLUDE without
-   the new INSERT statement breaks every write. Don't half-deploy.
-2. The migration adds an index; on a large prod DB this takes minutes and
-   blocks writes. Use `CREATE INDEX CONCURRENTLY` + `ADD CONSTRAINT …
-   USING INDEX` if production-scale (skipped here — dev seed is small).
-3. Roll back: drop the EXCLUDE, drop the column, restore the old GiST
-   index from 0001. Document this as `0003_revert_lanes.sql` ready to go.
+Server-only by default. Two paths:
+- **Keep server-only.** `apps/web/src/components/Timeline/lanes.ts` keeps
+  its visual lane assignment.
+- **Expose via `SessionFields`.** Add `lane: Int!` to the fragment, drop
+  the client-side assignment. Cleaner but couples UI to cap implementation.
 
-## Open question
-
-`lane` is server-only by default. Two options for the UI:
-
-- **Keep server-only.** UI's `Timeline/lanes.ts` continues assigning
-  visual lanes from `startTime` overlaps. Simple, no schema change.
-- **Expose via `SessionFields`.** Add `lane: Int!` to the fragment;
-  Timeline reads it directly; drop `Timeline/lanes.ts`. Less drift, but
-  ties UI to the cap implementation.
-
-Recommend: keep server-only for the first PR. Revisit when the UI audit
-happens.
+Decide when the web audit happens.
