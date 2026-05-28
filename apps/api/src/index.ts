@@ -21,8 +21,15 @@ async function main() {
     bodyLimit: 1024 * 1024, // 1 MB — GraphQL queries are never bigger
   });
 
+  // CORS: in production lock to WEB_ORIGIN (comma-separated allowed) so the
+  // public API can only be called from your own deployed site. In dev, reflect
+  // any origin so local tooling / e2e harnesses can hit it without ceremony.
+  const corsOrigin: boolean | string[] =
+    env.NODE_ENV === 'production' && env.WEB_ORIGIN
+      ? env.WEB_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean)
+      : true;
   await app.register(fastifyCors, {
-    origin: true,
+    origin: corsOrigin,
     credentials: true,
   });
 

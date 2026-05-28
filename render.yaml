@@ -1,0 +1,41 @@
+# Render Blueprint — declarative deploy config for the GraphQL API.
+#
+# Push this file to GitHub, then in Render: New → Blueprint → pick the repo.
+# Render reads this file, provisions the service, and wires the env vars.
+#
+# Two things to fill in by hand AFTER first deploy:
+#   1. DATABASE_URL — paste the pooled connection string from Neon
+#      (it ends in `-pooler.<region>.aws.neon.tech/<db>?sslmode=require`).
+#      The `_xact` advisory lock variant we use is safe under Neon's
+#      PgBouncer-in-transaction-mode pooler — see README §4.
+#   2. WEB_ORIGIN — paste the Netlify URL once that side is deployed,
+#      e.g. `https://my-app.netlify.app`. Until then, requests from the
+#      browser will be CORS-blocked (intentionally).
+#
+# Why Web Service (long-running) and not a Cron / Job: the API holds a
+# pg.Pool of 20 connections and serves a Fastify HTTP listener. Serverless
+# wouldn't fit — see README §10 (deploy notes).
+
+services:
+  - type: web
+    name: netronic-booking-api
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: apps/api
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    preDeployCommand: pnpm migrate
+    startCommand: pnpm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        sync: false        # fill in via Render UI on first deploy
+      - key: WEB_ORIGIN
+        sync: false        # fill in once Netlify site is live

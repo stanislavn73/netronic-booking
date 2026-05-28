@@ -373,7 +373,51 @@ a real product review:
 
 ---
 
-## 9. Eval checklist
+## 9. Deploying
+
+The recommended free-tier setup is a three-way split — frontend on Netlify,
+API on Render, Postgres on Neon. Total cost is **$0** on free tiers; the
+only caveat is Render's free Web Service sleeps after 15 min of inactivity
+(~30s cold start). Neon resumes from idle in under a second.
+
+Why not put everything on Netlify alone? The API is a long-running Fastify
+process with a `pg.Pool` and per-arena `pg_advisory_xact_lock`. Both work
+nicely with a persistent process and a pooled DB connection. Repackaging
+as serverless Functions would mean rewriting the API and still hosting
+Postgres separately — not worth it.
+
+### One-time setup
+
+1. **Database — Neon** (<https://neon.tech>): New project → copy the
+   **pooled** connection string (the host ends in
+   `-pooler.<region>.aws.neon.tech`). Our `_xact` advisory lock variant is
+   safe under PgBouncer transaction mode, which is what Neon's pooler uses.
+
+2. **API — Render** (<https://render.com>): New → Blueprint → connect this
+   repo. Render reads `render.yaml` and provisions the `netronic-booking-api`
+   Web Service. Fill in two env vars by hand:
+   - `DATABASE_URL` — the Neon pooled URL
+   - `WEB_ORIGIN` — set after step 3 (e.g. `https://my-app.netlify.app`)
+
+   First deploy runs `pnpm migrate` automatically via `preDeployCommand`.
+
+3. **Web — Netlify** (<https://netlify.com>): New site from Git → pick this
+   repo. Set **Base directory** to `apps/web`; Netlify reads
+   `apps/web/netlify.toml` for the rest. Set one env var in the UI:
+   - `VITE_API_URL = https://<your-render-subdomain>.onrender.com/graphql`
+
+   Then go back to Render and fill in `WEB_ORIGIN` with the Netlify URL.
+
+### Optional: demo data
+
+`pnpm db:seed` runs against the deployed DB if you point `DATABASE_URL` at
+the Neon URL locally and run the command from your laptop. The seed defaults
+to 100 arenas × 1 year and fits in Neon's free 0.5 GB. Override with env
+vars (`ARENAS=…`, `YEARS=…`) — see §1.
+
+---
+
+## 10. Eval checklist
 
 Mapping this implementation to the test's "what will be evaluated" section:
 
