@@ -13,7 +13,8 @@
     "test:verbose": "vitest run --reporter=verbose",
     "test:watch": "vitest",
     "schema:export": "tsx scripts/export-schema.ts",
-    "backfill:lanes": "tsx scripts/backfill-lanes.ts"
+    "backfill:lanes": "tsx scripts/backfill-lanes.ts",
+    "reset:seed:tiny": "tsx scripts/reset-seed-tiny.ts"
   },
   "dependencies": {
     "@apollo/server": "^5.5.1",

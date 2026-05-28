@@ -1,0 +1,45 @@
+-- =============================================================================
+-- 0003_lane_constraints.sql — phased rollout, step 2 of 2: enforce the cap.
+--
+-- DO NOT push this migration to production until you've run the lane
+-- backfill from a workstation:
+--
+--     DATABASE_URL='postgres://…' pnpm --filter @app/api backfill:lanes
+--
+-- The SET NOT NULL below fails if ANY active row still has lane IS NULL —
+-- which would mean backfill didn't run or didn't complete. Render would
+-- then keep the previous deploy serving traffic. Safe but wasteful.
+--
+-- After this migration applies:
+--   - Every active session has a lane 1..5 (validated by CHECK).
+--   - No two active sessions on the same (arena_id, lane) can overlap
+--     in time (EXCLUDE USING GIST). Postgres rejects any concurrent
+--     INSERT that would violate this with SQLSTATE 23P03; the service
+--     layer's retry loop handles that.
+--   - The old partial GiST sessions_arena_during_gist is redundant
+--     (the EXCLUDE builds an equivalent index) and is dropped.
+--   - Application-level `withArenaLock` is no longer required for cap
+--     enforcement and is dropped in the same PR's service code.
+-- =============================================================================
+
+ALTER TABLE sessions
+  ALTER COLUMN lane SET NOT NULL;
+
+ALTER TABLE sessions
+  ADD CONSTRAINT sessions_lane_in_range
+    CHECK (lane BETWEEN 1 AND 5);
+
+-- The schema-level cap. EXCLUDE builds an implicit GiST index on
+-- (arena_id, lane, during). On a multi-million-row table this can take
+-- 1-3 minutes with an ACCESS EXCLUSIVE lock — push during a low-traffic
+-- window. Within Render's default 5-minute startup timeout for the
+-- seed-scale dataset.
+ALTER TABLE sessions
+  ADD CONSTRAINT sessions_no_lane_overlap
+    EXCLUDE USING GIST (arena_id WITH =, lane WITH =, during WITH &&)
+    WHERE (status = 'active');
+
+-- The 0001 partial GiST on (arena_id, during) is now redundant — the
+-- EXCLUDE constraint creates an equivalent index that supports the
+-- same overlap probes. Dropping it avoids write-time double maintenance.
+DROP INDEX IF EXISTS sessions_arena_during_gist;

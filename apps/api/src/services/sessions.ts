@@ -3,27 +3,29 @@
  * concurrent active sessions per arena.
  *
  * SQL access lives in `db/sessions.repo.ts`. Sweep-line math in `db/sweep.ts`.
- * This file is just orchestration: validate → lock → probe → write.
+ * This file is just orchestration: validate → lock → atomic-pick-a-lane
+ * INSERT/UPDATE → probe-for-meta on cap reach.
  *
- * Concurrency rationale and the "max-concurrent vs total-overlap" trade-off
- * are documented in `.claude/ARCHITECTURE.md §7`. Don't replace the sweep
- * with `COUNT(*)`.
+ * Current concurrency model: per-arena `pg_advisory_xact_lock` (via
+ * `withArenaLock`) serializes writes for the same arena. The atomic-pick-a
+ * lane INSERT cannot race itself while the lock is held.
+ *
+ * Migration 0003 (parked — see `migrations/0003_lane_constraints.sql.pending`)
+ * will add a Postgres EXCLUDE constraint that makes the cap a schema-level
+ * invariant. At that point the advisory lock becomes redundant — replace
+ * `withArenaLock` with `withLaneRetry` from `db/pg-errors.ts`.
  */
 import type { Pool, PoolClient } from 'pg';
 import { pool } from '../db/index.js';
 import {
   arenaExists,
   cancelSession,
-  getArenaById,
   insertActiveSession,
-  listArenas as listArenasRepo,
   selectActiveIntervals,
   selectActiveSessions,
   selectActiveSessionsForArenas,
   selectSessionById,
   updateSessionRow,
-  type ArenaRow,
-  type ListArenasArgs,
   type SessionRow,
 } from '../db/sessions.repo.js';
 import {
@@ -39,9 +41,11 @@ import {
   ARENA_CAPACITY,
   MAX_DURATION_MIN,
   SessionInputSchema,
+  UpdateSessionInputSchema,
   assertValidDuration,
   normalizeInput,
   type SessionInput,
+  type UpdateSessionInput,
 } from './validation.js';
 
 /** Public session shape — re-export of the repo row. */
@@ -111,12 +115,6 @@ function slotUnavailable(args: {
 // Public service API
 // =============================================================================
 
-/** List arenas with optional ILIKE search; bounded pagination. */
-export const listArenas = (args: ListArenasArgs = {}): Promise<ArenaRow[]> => listArenasRepo(args);
-
-/** Single arena by id, or null. */
-export const getArena = (id: number): Promise<ArenaRow | null> => getArenaById(id);
-
 /** Active sessions for an arena inside `[from, to)`, ordered by start. */
 export const sessionsByArena = (
   arenaId: number,
@@ -170,12 +168,10 @@ export async function checkAvailability(
 /**
  * Create an active session for an arena.
  *
- * Tries an atomic-pick-a-lane INSERT first. If 0 rows return, the arena
- * is at capacity for the requested window — we then run a concurrency
- * probe purely to populate `fillsUpAt` / `maxAvailableDurationMinutes`
- * on the SLOT_UNAVAILABLE meta. The probe is a separate read; the
- * advisory lock keeps the picture coherent until {@link 0003_lanes_constraints.sql}
- * adds the EXCLUDE constraint and the lock becomes redundant.
+ * Inside the per-arena advisory lock, runs the atomic-pick-a-lane INSERT.
+ * If 0 rows return, the arena is at capacity for the requested window —
+ * we then run a concurrency probe purely to populate `fillsUpAt` and
+ * `maxAvailableDurationMinutes` on the SLOT_UNAVAILABLE meta.
  *
  * @throws DomainError<'VALIDATION_FAILED'> on Zod parse failure (re-thrown ZodError).
  * @throws DomainError<'INVALID_DURATION'> if the derived window violates bounds.
@@ -197,32 +193,16 @@ export async function createSession(input: SessionInput): Promise<SessionRecord>
       playerName: norm.playerName ?? null,
     });
     if (inserted) return inserted;
-
-    // Cap reached. Probe for the rich meta so the UI can suggest alternatives.
-    const window: Window = { start: norm.start, end: norm.end };
-    const probe = await probeConcurrency(client, norm.arenaId, window);
-    const maxAvailMs = await maxAvailableDurationMs(client, norm.arenaId, norm.start);
-    throw slotUnavailable({
-      arenaId: norm.arenaId,
-      start: norm.start,
-      end: norm.end,
-      probe,
-      maxAvailableDurationMinutes: toMinutes(maxAvailMs),
-      context: 'create',
-    });
+    return throwSlotUnavailable(client, norm.arenaId, norm.start, norm.end, undefined, 'create');
   });
 }
 
-export interface UpdateSessionInput {
-  startTime?: Date;
-  endTime?: Date;
-  durationMinutes?: number;
-  /** `undefined` keeps existing; explicit `null` or string overwrites. */
-  playerName?: string | null;
-}
-
 /**
- * Update a session's window and/or playerName.
+ * Update a session's window and/or playerName. `playerName: null` clears
+ * it; `playerName: undefined` (the default if the field is omitted) keeps
+ * the existing value.
+ *
+ * @throws DomainError<'VALIDATION_FAILED'> on Zod parse failure.
  * @throws DomainError<'SESSION_NOT_FOUND'>
  * @throws DomainError<'INVALID_DURATION'>
  * @throws DomainError<'SLOT_UNAVAILABLE'>
@@ -231,29 +211,25 @@ export async function updateSession(
   id: number,
   input: UpdateSessionInput,
 ): Promise<SessionRecord> {
-  // Resolve arena and current window from a stable snapshot before locking.
+  const parsed = UpdateSessionInputSchema.parse(input);
+
   const current = await selectSessionById(pool, id);
   if (!current) {
     throw new DomainError('SESSION_NOT_FOUND', `Session ${id} not found`, { sessionId: id });
   }
 
-  const start = input.startTime ?? current.startTime;
+  const start = parsed.startTime ?? current.startTime;
   const end =
-    input.endTime ??
-    (input.durationMinutes
-      ? new Date(start.getTime() + minutes(input.durationMinutes))
+    parsed.endTime ??
+    (parsed.durationMinutes
+      ? new Date(start.getTime() + minutes(parsed.durationMinutes))
       : current.endTime);
   assertValidDuration(start, end);
 
+  const playerName = parsed.playerName === undefined ? current.playerName : parsed.playerName;
   return withArenaLock(current.arenaId, async (client) => {
-    // Re-read inside the lock so playerName writes don't race a concurrent update.
-    const locked = await selectSessionById(client, id);
-    if (!locked) {
-      throw new DomainError('SESSION_NOT_FOUND', `Session ${id} not found`, { sessionId: id });
-    }
-    const playerName = input.playerName === undefined ? locked.playerName : input.playerName;
     const result = await updateSessionRow(client, id, {
-      arenaId: locked.arenaId,
+      arenaId: current.arenaId,
       start,
       end,
       playerName,
@@ -262,24 +238,33 @@ export async function updateSession(
     if (result.kind === 'not_found') {
       throw new DomainError('SESSION_NOT_FOUND', `Session ${id} not found`, { sessionId: id });
     }
-    // Cap reached at the new window — probe for rich meta.
-    const window: Window = { start, end };
-    const probe = await probeConcurrency(client, locked.arenaId, window, id);
-    const maxAvailMs = await maxAvailableDurationMs(
-      client,
-      locked.arenaId,
-      start,
-      undefined,
-      id,
-    );
-    throw slotUnavailable({
-      arenaId: locked.arenaId,
-      start,
-      end,
-      probe,
-      maxAvailableDurationMinutes: toMinutes(maxAvailMs),
-      context: 'update',
-    });
+    return throwSlotUnavailable(client, current.arenaId, start, end, id, 'update');
+  });
+}
+
+/**
+ * Build and throw a SLOT_UNAVAILABLE DomainError with a fresh concurrency
+ * probe over the requested window. `excludeId` excludes a session from
+ * the probe so update paths don't count it against itself.
+ */
+async function throwSlotUnavailable(
+  q: Q,
+  arenaId: number,
+  start: Date,
+  end: Date,
+  excludeId: number | undefined,
+  context: 'create' | 'update',
+): Promise<never> {
+  const window: Window = { start, end };
+  const probe = await probeConcurrency(q, arenaId, window, excludeId);
+  const maxAvailMs = await maxAvailableDurationMs(q, arenaId, start, undefined, excludeId);
+  throw slotUnavailable({
+    arenaId,
+    start,
+    end,
+    probe,
+    maxAvailableDurationMinutes: toMinutes(maxAvailMs),
+    context,
   });
 }
 

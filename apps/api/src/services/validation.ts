@@ -25,6 +25,20 @@ export const SessionInputSchema = z
 
 export type SessionInput = z.infer<typeof SessionInputSchema>;
 
+/**
+ * Input schema for update. Every field is optional — caller supplies only
+ * the bits that change. `playerName` accepts `null` to explicitly clear it
+ * vs `undefined` which means "leave alone".
+ */
+export const UpdateSessionInputSchema = z.object({
+  startTime: z.coerce.date().optional(),
+  endTime: z.coerce.date().optional(),
+  durationMinutes: z.number().int().min(MIN_DURATION_MIN).max(MAX_DURATION_MIN).optional(),
+  playerName: z.string().trim().min(1).max(120).nullable().optional(),
+});
+
+export type UpdateSessionInput = z.infer<typeof UpdateSessionInputSchema>;
+
 export interface NormalizedSession {
   arenaId: number;
   start: Date;

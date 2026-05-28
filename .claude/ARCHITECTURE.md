@@ -71,20 +71,29 @@ never plain `Error`.
 - `errors.ts` — `DomainError<C>` with typed `meta` per code via
   `DomainErrorMetaByCode`. Use `err.is('SLOT_UNAVAILABLE')` to narrow.
 - `validation.ts` — single source for duration bounds via
-  `assertValidDuration(start, end)`. Both `createSession` and
-  `updateSession` go through it.
-- `sessions.ts` — orchestration only: validate → lock → probe → write.
-  Never inline SQL or event-sweep math; call the repo + sweep helpers.
+  `assertValidDuration`. Zod schemas: `SessionInputSchema` for create,
+  `UpdateSessionInputSchema` for update (both go through `.parse(...)` in
+  their respective service entry points).
+- `arenas.ts` — `listArenas`, `getArena`. Read-only (arenas are seeded).
+- `sessions.ts` — orchestration only: validate → atomic-pick-a-lane
+  INSERT (with 23P03 retry) → probe-for-meta on cap reach. Never inline
+  SQL or event-sweep math; call the repo + sweep helpers.
 - `slots.ts` — `suggestSlots` on top of `buildEvents`.
 - `availability.ts` — `buildSlotUnavailable` payload (suggestions sized to
   the caller's requested duration).
 
 ### `apps/api/src/graphql/`
 Pothos schema (code-first). Resolvers are thin: parse input → call a
-service → call `mapMutationError` on throws.
+service → call `mapMutationError` on throws. No file > 200 LOC.
 
-- `schema.ts` — types, refs, unions, query/mutation field definitions. No
-  domain logic.
+- `schema.ts` — entry point. Side-effect imports `./types`, `./inputs`,
+  `./queries`, `./mutations`, then `builder.toSchema()`.
+- `types.ts` — every object ref, enum, and union (Arena, Session, Slot,
+  AvailabilityResult, SessionPayload, SlotUnavailable, ValidationFailed,
+  NotFound, SessionDeleted, plus the three result unions).
+- `inputs.ts` — Pothos input types (`CreateSessionInput`, `UpdateSessionInput`).
+- `queries.ts` — `builder.queryType(...)` registration.
+- `mutations.ts` — `builder.mutationType(...)` registration.
 - `error-mapping.ts` — `mapMutationError(err)`: Zod/DomainError → union
   variant. Re-throws unknown errors so Apollo surfaces them.
 - `resolve-type.ts` — shared `mutationResultTypeName` discriminant. If you
@@ -199,11 +208,29 @@ is doing the extraction work, not adding a feature.
 The spec rule "at any moment in time the count of active sessions shall
 not exceed N" requires **max-concurrent**, not total-overlapping.
 
-- **Server**: `apps/api/src/services/sessions.ts → probeConcurrency`
-  (orchestration) delegates to `apps/api/src/db/sweep.ts → sweepConcurrency`
-  (pure). Returns `{ max, firstFillAt }`. Cap check is
-  `probe.max >= ARENA_CAPACITY`. There is only one sweep implementation —
-  do NOT inline another.
+- **Server, cap enforcement** (current — pre-0003):
+  `withArenaLock` + atomic-pick-a-lane INSERT.
+  `withArenaLock` takes a per-arena `pg_advisory_xact_lock` so two
+  concurrent createSession calls for the same arena serialize. Inside the
+  lock, `insertActiveSession` runs
+  `INSERT … SELECT FROM generate_series(1, 5) WHERE NOT EXISTS (…)` —
+  picks the first free lane atomically. 0 rows back = arena full →
+  SLOT_UNAVAILABLE.
+- **Migration 0003** (parked — see
+  `apps/api/src/db/migrations/0003_lane_constraints.sql.pending`):
+  EXCLUDE on `(arena_id, lane, during) WHERE status='active'` makes the
+  cap a schema-level invariant. When it lands: drop `withArenaLock`,
+  wrap the INSERT/UPDATE in a 23P03 retry loop via `isExclusionViolation`
+  from `db/pg-errors.ts` (already in place, ready for use).
+  Blocked on Neon free-tier storage — needs `reset:seed:tiny` or a plan
+  upgrade so the backfill UPDATE volume fits.
+- **Server, SLOT_UNAVAILABLE meta**: `apps/api/src/services/sessions.ts →
+  probeConcurrency` calls `apps/api/src/db/sweep.ts → sweepConcurrency`
+  to compute `fillsUpAt` and `maxAvailableDurationMinutes`. Only runs on
+  the failure path so the happy-path INSERT is one round-trip.
+- **Client (display only)**: `apps/web/src/lib/concurrency.ts →
+  hourlyPeakConcurrent`. Visual density chips only.
+- There is only one sweep implementation — do NOT inline another.
 - **Client (display only)**: `apps/web/src/lib/concurrency.ts →
   hourlyPeakConcurrent`. Same algorithm, mirrored for visual density chips.
 

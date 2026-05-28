@@ -1,5 +1,13 @@
 # 0002_lanes — phased rollout
 
+> **Status: paused after step 1.** Step 1 (column-only 0002) is deployed.
+> Steps 2–3 (backfill + EXCLUDE) are blocked on Neon free-tier storage
+> being too tight to absorb a ~2M-row UPDATE's MVCC bloat. Restart via
+> `pnpm --filter @app/api reset:seed:tiny` (shrinks the dataset) or a
+> Neon Launch upgrade. The renamed file
+> `0003_lane_constraints.sql.pending` is skipped by `scripts/migrate.ts`
+> until you rename it back to `.sql`.
+
 The original single-shot 0002 (column + backfill + EXCLUDE in one migration)
 proved unsafe at production scale on Render's free tier — the backfill
 required a multi-million-row PL/pgSQL UPDATE inside one transaction, far
