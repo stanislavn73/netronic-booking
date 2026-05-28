@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { addDays, format } from 'date-fns';
+import { addDays, format, parse } from 'date-fns';
 import { ArenaList } from './components/ArenaList';
 import { Timeline } from './components/Timeline';
 import { SessionModal } from './components/SessionModal';
@@ -33,7 +33,15 @@ export function App() {
           <input
             type="date"
             value={format(date, 'yyyy-MM-dd')}
-            onChange={(e) => setDate(new Date(e.target.value))}
+            onChange={(e) => {
+              // `new Date("2026-05-27")` parses as UTC midnight — on a
+              // non-UTC machine that's a different local day than the user
+              // picked. date-fns `parse` interprets the string as LOCAL,
+              // which is what every other piece of date handling in the app
+              // assumes.
+              if (!e.target.value) return;
+              setDate(parse(e.target.value, 'yyyy-MM-dd', new Date()));
+            }}
             className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm"
           />
           <button

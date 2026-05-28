@@ -217,12 +217,23 @@ function zodIssues(err: ZodError) {
   };
 }
 
+/**
+ * Build a SlotUnavailable variant with nearest-available suggestions sized to
+ * the SAME duration the caller asked for.
+ *
+ * Previously this hard-coded a 1-hour fallback regardless of the requested
+ * duration. A user trying to book a 3-hour session would see suggestion chips
+ * for 1-hour gaps and still hit SLOT_UNAVAILABLE after clicking one — the
+ * "nearest available slots" promise was a lie. The duration MUST be the
+ * caller's requested window length.
+ */
 async function unavailableWithSuggestions(args: {
   arenaId: number;
   start: Date;
+  end: Date;
   conflictingCount: number;
 }): Promise<SlotUnavailableT> {
-  const durationMs = 60 * 60_000; // for the "nearest" hint, default to 1h if duration unknown
+  const durationMs = args.end.getTime() - args.start.getTime();
   const suggestions = await suggestSlots({
     arenaId: args.arenaId,
     preferredStart: args.start,
@@ -234,6 +245,26 @@ async function unavailableWithSuggestions(args: {
     capacity: ARENA_CAPACITY,
     suggestions,
   };
+}
+
+/**
+ * Derive [start, end) from a CreateSessionInput before the service runs.
+ *
+ * The service does the same derivation under Zod, but throws on conflict
+ * before returning the parsed end. We replay it here purely so the
+ * SlotUnavailable variant can size its suggestions correctly. Returns null
+ * for invalid inputs — the service's ValidationFailed will fire first.
+ */
+function deriveCreateEnd(input: {
+  startTime: Date;
+  endTime?: Date | null;
+  durationMinutes?: number | null;
+}): Date | null {
+  if (input.endTime) return input.endTime;
+  if (input.durationMinutes != null) {
+    return new Date(input.startTime.getTime() + input.durationMinutes * 60_000);
+  }
+  return null;
 }
 
 // =============================================================================
@@ -338,10 +369,27 @@ builder.mutationType({
               return { message: err.message };
             }
             if (err.code === 'SLOT_UNAVAILABLE') {
+              // Prefer the actual normalized window from the service (always
+              // populated on SLOT_UNAVAILABLE); fall back to deriving from the
+              // raw input for forward-compatibility if a future code path
+              // forgets to include them.
+              const meta = err.meta as { start?: Date; end?: Date; conflictingCount?: number };
+              const start = meta.start ?? input.startTime;
+              const end =
+                meta.end ??
+                deriveCreateEnd({
+                  startTime: input.startTime,
+                  endTime: input.endTime,
+                  durationMinutes: input.durationMinutes,
+                }) ??
+                // Last-resort 1h window — only reached if neither service nor
+                // input gave us a duration. Logged so it's visible.
+                new Date(start.getTime() + 60 * 60_000);
               return unavailableWithSuggestions({
                 arenaId: Number(input.arenaId),
-                start: input.startTime,
-                conflictingCount: Number(err.meta.conflictingCount ?? 0),
+                start,
+                end,
+                conflictingCount: Number(meta.conflictingCount ?? 0),
               });
             }
             return { issues: [{ field: '_root', message: err.message }] };
@@ -376,10 +424,16 @@ builder.mutationType({
               return { message: err.message };
             }
             if (err.code === 'SLOT_UNAVAILABLE') {
-              const meta = err.meta as { arenaId: number; start: Date; conflictingCount: number };
+              const meta = err.meta as {
+                arenaId: number;
+                start: Date;
+                end: Date;
+                conflictingCount: number;
+              };
               return unavailableWithSuggestions({
                 arenaId: meta.arenaId,
                 start: meta.start,
+                end: meta.end,
                 conflictingCount: meta.conflictingCount,
               });
             }

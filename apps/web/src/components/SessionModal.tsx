@@ -10,6 +10,7 @@ import {
   UPDATE_SESSION,
 } from '../gql/queries';
 import type { Session, SlotSuggestion } from '../lib/types';
+import { dayWindow } from '../lib/date';
 import { format } from 'date-fns';
 
 const FormSchema = z.object({
@@ -60,26 +61,24 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
     suggestions?: SlotSuggestion[];
   } | null>(null);
 
-  const refetchVars = {
-    refetchQueries: [
-      {
-        query: SESSIONS_BY_ARENA,
-        variables: {
-          arenaId,
-          from: new Date(date.getFullYear(), date.getMonth(), date.getDate()).toISOString(),
-          to: new Date(
-            date.getFullYear(),
-            date.getMonth(),
-            date.getDate(),
-            23,
-            59,
-            59,
-            999,
-          ).toISOString(),
+  // Reuse the SAME dayWindow Timeline uses so Apollo's cache key matches
+  // exactly — otherwise the refetch writes into a sibling cache entry and
+  // the visible timeline doesn't update.
+  const refetchVars = (() => {
+    const { from, to } = dayWindow(date);
+    return {
+      refetchQueries: [
+        {
+          query: SESSIONS_BY_ARENA,
+          variables: {
+            arenaId,
+            from: from.toISOString(),
+            to: to.toISOString(),
+          },
         },
-      },
-    ],
-  };
+      ],
+    };
+  })();
 
   const [createMutation] = useMutation(CREATE_SESSION, refetchVars);
   const [updateMutation] = useMutation(UPDATE_SESSION, refetchVars);
