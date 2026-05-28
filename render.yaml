@@ -30,11 +30,18 @@ services:
     # overrides that for this install only; NODE_ENV stays `production` at
     # runtime so the app behaves correctly.
     buildCommand: corepack enable && pnpm install --frozen-lockfile --prod=false && pnpm build
-    # NOTE: Render's free tier does not support `preDeployCommand`, so we run
+    # NOTE 1: Render's free tier does not support `preDeployCommand`, so we run
     # migrations inside the start command. `scripts/migrate.ts` records every
     # applied filename in `schema_migrations`, so subsequent boots are no-ops
     # and there's no penalty for re-running on every container start.
-    startCommand: pnpm migrate && pnpm start
+    #
+    # NOTE 2: We run the API via `tsx` (TypeScript runner) instead of the
+    # compiled `dist/index.js`. Render's free-tier deploy strips `.gitignore`d
+    # files from the build upload, and `dist/` is ignored — so `node dist/index.js`
+    # would fail with "Cannot find module" at runtime. Running tsx directly is
+    # zero-config and the startup cost is negligible for a long-running server.
+    # On the paid tier with a Docker runtime, switch back to `pnpm start`.
+    startCommand: pnpm migrate && pnpm exec tsx src/index.ts
     healthCheckPath: /health
     autoDeploy: true
     envVars:
