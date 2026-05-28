@@ -1,0 +1,109 @@
+type Arena {
+  createdAt: DateTime!
+  id: ID!
+  name: String!
+  sessions(from: DateTime!, to: DateTime!): [Session!]!
+}
+
+type AvailabilityResult {
+  available: Boolean!
+  capacity: Int!
+  conflictingCount: Int!
+  fillsUpAt: DateTime
+  maxAvailableDurationMinutes: Int!
+}
+
+input CreateSessionInput {
+  arenaId: ID!
+  durationMinutes: Int
+  endTime: DateTime
+  playerName: String
+  startTime: DateTime!
+}
+
+union CreateSessionResult = NotFound | SessionPayload | SlotUnavailable | ValidationFailed
+
+"""
+A date-time string at UTC, such as 2007-12-03T10:15:30Z, compliant with the `date-time` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
+"""
+scalar DateTime
+
+union DeleteSessionResult = NotFound | SessionDeleted
+
+type Mutation {
+  createSession(input: CreateSessionInput!): CreateSessionResult!
+  deleteSession(id: ID!): DeleteSessionResult!
+  updateSession(id: ID!, input: UpdateSessionInput!): UpdateSessionResult!
+}
+
+type NotFound {
+  message: String!
+}
+
+type Query {
+  arena(id: ID!): Arena
+  arenas(limit: Int = 50, offset: Int = 0, search: String): [Arena!]!
+  capacity: Int!
+  checkAvailability(arenaId: ID!, durationMinutes: Int!, startTime: DateTime!): AvailabilityResult!
+  maxDurationMinutes: Int!
+  minDurationMinutes: Int!
+  sessionsByArena(arenaId: ID!, from: DateTime!, to: DateTime!): [Session!]!
+  suggestSlots(arenaId: ID!, durationMinutes: Int!, maxResults: Int = 5, preferredStart: DateTime!, withinDays: Int = 14): [Slot!]!
+}
+
+type Session {
+  arenaId: ID!
+  createdAt: DateTime!
+  durationMinutes: Int!
+  endTime: DateTime!
+  id: ID!
+  playerName: String
+  startTime: DateTime!
+  status: SessionStatus!
+  updatedAt: DateTime!
+}
+
+type SessionDeleted {
+  id: ID!
+}
+
+type SessionPayload {
+  session: Session!
+}
+
+enum SessionStatus {
+  active
+  cancelled
+}
+
+type Slot {
+  end: DateTime!
+  start: DateTime!
+}
+
+type SlotUnavailable {
+  capacity: Int!
+  conflictingCount: Int!
+  fillsUpAt: DateTime
+  maxAvailableDurationMinutes: Int!
+  message: String!
+  suggestions: [Slot!]!
+}
+
+input UpdateSessionInput {
+  durationMinutes: Int
+  endTime: DateTime
+  playerName: String
+  startTime: DateTime
+}
+
+union UpdateSessionResult = NotFound | SessionPayload | SlotUnavailable | ValidationFailed
+
+type ValidationFailed {
+  issues: [ValidationIssue!]!
+}
+
+type ValidationIssue {
+  field: String!
+  message: String!
+}

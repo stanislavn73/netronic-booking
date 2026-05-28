@@ -1,0 +1,116 @@
+# All client-side GraphQL operations and fragments.
+# Single source of truth for `pnpm codegen` — edits here regenerate types
+# and TypedDocumentNodes in src/gql/__generated__/operations.ts.
+
+fragment SessionFields on Session {
+  id
+  arenaId
+  startTime
+  endTime
+  durationMinutes
+  playerName
+  status
+}
+
+# Every field on SlotUnavailable the modal's error panel renders.
+fragment SlotUnavailableFields on SlotUnavailable {
+  message
+  conflictingCount
+  capacity
+  suggestions {
+    start
+    end
+  }
+  fillsUpAt
+  maxAvailableDurationMinutes
+}
+
+query Arenas($search: String) {
+  arenas(limit: 200, search: $search) {
+    id
+    name
+  }
+}
+
+# Probes occupancy at a proposed start. Used by the modal's "Fits up to N min".
+query CheckAvailability(
+  $arenaId: ID!
+  $startTime: DateTime!
+  $durationMinutes: Int!
+) {
+  checkAvailability(
+    arenaId: $arenaId
+    startTime: $startTime
+    durationMinutes: $durationMinutes
+  ) {
+    available
+    conflictingCount
+    capacity
+    maxAvailableDurationMinutes
+    fillsUpAt
+  }
+}
+
+query SessionsByArena($arenaId: ID!, $from: DateTime!, $to: DateTime!) {
+  sessionsByArena(arenaId: $arenaId, from: $from, to: $to) {
+    ...SessionFields
+  }
+}
+
+mutation CreateSession($input: CreateSessionInput!) {
+  createSession(input: $input) {
+    __typename
+    ... on SessionPayload {
+      session {
+        ...SessionFields
+      }
+    }
+    ... on SlotUnavailable {
+      ...SlotUnavailableFields
+    }
+    ... on ValidationFailed {
+      issues {
+        field
+        message
+      }
+    }
+    ... on NotFound {
+      message
+    }
+  }
+}
+
+mutation UpdateSession($id: ID!, $input: UpdateSessionInput!) {
+  updateSession(id: $id, input: $input) {
+    __typename
+    ... on SessionPayload {
+      session {
+        ...SessionFields
+      }
+    }
+    ... on SlotUnavailable {
+      ...SlotUnavailableFields
+    }
+    ... on ValidationFailed {
+      issues {
+        field
+        message
+      }
+    }
+    ... on NotFound {
+      message
+    }
+  }
+}
+
+mutation DeleteSession($id: ID!) {
+  deleteSession(id: $id) {
+    __typename
+    ... on SessionDeleted {
+      id
+    }
+    ... on NotFound {
+      message
+    }
+  }
+}

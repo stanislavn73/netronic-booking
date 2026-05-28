@@ -11,7 +11,8 @@
     "seed": "tsx scripts/seed.ts",
     "test": "vitest run",
     "test:verbose": "vitest run --reporter=verbose",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "schema:export": "tsx scripts/export-schema.ts"
   },
   "dependencies": {
     "@apollo/server": "^5.5.1",

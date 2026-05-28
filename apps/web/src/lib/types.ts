@@ -1,61 +1,41 @@
 /**
- * Hand-rolled types that mirror the GraphQL schema.
+ * Type re-exports from the generated GraphQL operations file.
+ * Source of truth: `operations.graphql` + `apps/api/schema.graphql`,
+ * compiled by `pnpm codegen` into `src/gql/__generated__/operations.ts`.
+ * Do NOT add hand-rolled types here.
  *
- * TODO: replace with `@graphql-codegen` output (pending task P1-6). Until then,
- * keep this file in lockstep with `apps/api/src/graphql/schema.ts` — every
- * server-side field addition needs a matching edit here.
+ * Each alias is derived from the smallest shape the UI actually queries —
+ * no over-broad "full schema" types. Names preserve historical aliases so
+ * call sites don't have to change.
  */
+import type {
+  ArenasQuery,
+  CheckAvailabilityQuery,
+  CreateSessionMutation,
+  SessionFieldsFragment,
+  SlotUnavailableFieldsFragment,
+} from '@/gql/__generated__/operations';
 
-export interface Arena {
-  id: string;
-  name: string;
-}
+/** Listed arena (id + name only — what `ArenasQuery` fetches). */
+export type Arena = ArenasQuery['arenas'][number];
 
-export interface Session {
-  id: string;
-  arenaId: string;
-  /** ISO-8601 UTC instant. */
-  startTime: string;
-  /** ISO-8601 UTC instant. */
-  endTime: string;
-  durationMinutes: number;
-  playerName: string | null;
-  status: 'active' | 'cancelled';
-}
+/** Full Session shape the UI uses, matching the `SessionFields` fragment. */
+export type Session = SessionFieldsFragment;
 
-export interface SlotSuggestion {
-  /** ISO-8601 UTC instant. */
-  start: string;
-  /** ISO-8601 UTC instant. */
-  end: string;
-}
+/** Availability probe result. */
+export type AvailabilityResult = CheckAvailabilityQuery['checkAvailability'];
 
-export interface AvailabilityResult {
-  available: boolean;
-  /** Peak concurrent active sessions during the proposed window. */
-  conflictingCount: number;
-  capacity: number;
-  /** Largest duration (minutes) that would fit at the proposed start. */
-  maxAvailableDurationMinutes: number;
-  /** ISO-8601 instant where the cap is first reached, or null. */
-  fillsUpAt: string | null;
-}
+/** Suggestion slot — `{ start, end }` ISO instants. */
+export type SlotSuggestion = SlotUnavailableFieldsFragment['suggestions'][number];
 
-/** Shape of `ValidationFailed.issues[i]` from any session mutation. */
-export interface ValidationIssue {
-  field: string;
-  message: string;
-}
+/** Shape of `ValidationFailed.issues[i]` returned by any session mutation. */
+export type ValidationIssue = Extract<
+  CreateSessionMutation['createSession'],
+  { __typename: 'ValidationFailed' }
+>['issues'][number];
 
 /**
  * SlotUnavailable payload as returned by createSession / updateSession.
- * Mirrors the `SlotUnavailable` GraphQL type.
+ * Mirrors the `SlotUnavailableFields` fragment.
  */
-export interface SlotUnavailablePayload {
-  message: string;
-  conflictingCount: number;
-  capacity: number;
-  suggestions: SlotSuggestion[];
-  fillsUpAt: string | null;
-  maxAvailableDurationMinutes: number;
-}
+export type SlotUnavailablePayload = SlotUnavailableFieldsFragment;

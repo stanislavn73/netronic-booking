@@ -35,8 +35,12 @@ apps/
       components/      # Domain components (ArenaList, Timeline/, SessionModal/)
       hooks/           # useEscapeKey, useAvailabilityProbe, useSessionMutations,
                        # useDayOfSessions
-      lib/             # date.ts, concurrency.ts, types.ts (no React, no GQL)
-      gql/             # queries.ts + fragments.ts
+      lib/             # date.ts, concurrency.ts, types.ts
+                       # (types.ts re-exports from gql/__generated__)
+      gql/             # operations.graphql (source of truth for ops),
+                       # queries.ts/fragments.ts (typed re-exports),
+                       # __generated__/operations.ts (codegen output —
+                       # never edit by hand; `pnpm codegen`)
       apollo.ts main.tsx App.tsx
 CLAUDE.md              # ← you are here
 .claude/
@@ -51,10 +55,11 @@ PLAN.md                # Historical design notes (don't update)
 ## 2. The most important invariant
 
 **The 5-cap check uses MAX-CONCURRENT, not COUNT(*).** See
-`apps/api/src/services/sessions.ts → maxConcurrentDuring`. If you "fix"
-this by replacing it with `COUNT(*)` you will reintroduce the prod "8 of 5"
-bug. The spec says "at any moment in time" — implement that literally
-via sweep-line over events clipped to the proposed window.
+`apps/api/src/services/sessions.ts → probeConcurrency` →
+`apps/api/src/db/sweep.ts → sweepConcurrency`. If you "fix" this by
+replacing it with `COUNT(*)` you will reintroduce the prod "8 of 5" bug.
+The spec says "at any moment in time" — implement that literally via
+sweep-line over events clipped to the proposed window.
 
 ---
 
@@ -67,6 +72,8 @@ make seed                   # generate 100 arenas × 1y of dense data
 pnpm dev                    # API :4000 + web :5173 in parallel
 pnpm test                   # api vitest (needs make up first)
 pnpm e2e                    # playwright (boots its own dev servers)
+pnpm --filter @app/api schema:export    # regen apps/api/schema.graphql
+pnpm --filter @app/web codegen          # regen web TypedDocumentNodes
 ```
 
 Typecheck only (fastest sanity check before committing):
