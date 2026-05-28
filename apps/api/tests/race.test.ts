@@ -240,6 +240,70 @@ describe('race conditions on the 5-concurrent cap', () => {
     expect(Number(rows[0]?.c ?? 0)).toBe(5);
   }, 60_000);
 
+  it('cap check uses MAX-CONCURRENT, not total touched (regression: "8 of 5" prod bug)', async () => {
+    // The bug: createSession used to call countOverlapping which returned the
+    //   total number of sessions whose range overlapped the requested window.
+    //   For long proposals in dense arenas, that count routinely exceeded 5
+    //   even when no instant within the window had more than 5 concurrent.
+    //
+    // The fix: the service now computes max-concurrent via a sweep over events
+    //   clipped to the proposed window. This test pins that behaviour by
+    //   constructing a scenario where total-touched > 5 but max-concurrent ≤ 4
+    //   and asserts that a long proposal at the same window SUCCEEDS.
+    const { createSession } = await import('../src/services/sessions.js');
+    const { pool } = await import('../src/db/index.js');
+
+    await pool.query('TRUNCATE sessions RESTART IDENTITY');
+
+    // Three sessions spanning the entire [10:00, 13:00) window — lanes A, B, C.
+    for (let i = 0; i < 3; i++) {
+      await createSession({
+        arenaId: 1,
+        startTime: new Date('2030-04-01T10:00:00Z'),
+        endTime: new Date('2030-04-01T13:00:00Z'),
+      });
+    }
+    // Three back-to-back short sessions in lane D filling that same window.
+    await createSession({
+      arenaId: 1,
+      startTime: new Date('2030-04-01T10:00:00Z'),
+      endTime: new Date('2030-04-01T11:00:00Z'),
+    });
+    await createSession({
+      arenaId: 1,
+      startTime: new Date('2030-04-01T11:00:00Z'),
+      endTime: new Date('2030-04-01T12:00:00Z'),
+    });
+    await createSession({
+      arenaId: 1,
+      startTime: new Date('2030-04-01T12:00:00Z'),
+      endTime: new Date('2030-04-01T13:00:00Z'),
+    });
+
+    // 6 sessions all touch [10:00, 13:00) — total-overlap COUNT is 6.
+    // But at any instant within the window, max-concurrent is 4 (3 lanes
+    // running long + 1 lane running a short, touching-not-overlapping pair
+    // counts as one because of half-open semantics). Adding a 5th lane (the
+    // proposal) brings concurrent to 5 → exactly at cap, allowed.
+    const result = await createSession({
+      arenaId: 1,
+      startTime: new Date('2030-04-01T10:00:00Z'),
+      endTime: new Date('2030-04-01T13:00:00Z'),
+    });
+
+    expect(result.id).toBeGreaterThan(0);
+
+    // Now we're full — a 5th lane already exists. A SIXTH long proposal
+    // for the same window must hit max-concurrent = 5 and be rejected.
+    await expect(
+      createSession({
+        arenaId: 1,
+        startTime: new Date('2030-04-01T10:00:00Z'),
+        endTime: new Date('2030-04-01T13:00:00Z'),
+      }),
+    ).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+  }, 60_000);
+
   it('the "touching is not overlap" rule holds (5 ending at 11:00 + 5 starting at 11:00)', async () => {
     const { createSession, sessionsByArena } = await import('../src/services/sessions.js');
     const { pool } = await import('../src/db/index.js');

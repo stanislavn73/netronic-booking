@@ -89,21 +89,32 @@ async function arenaExists(client: PoolClient | Pool, arenaId: number): Promise<
 }
 
 /**
- * Count overlapping ACTIVE sessions on [start, end). The half-open form means
+ * Maximum number of ACTIVE sessions that are simultaneously running at any
+ * instant inside the half-open window [start, end). The half-open form means
  * end == otherStart does NOT count as overlap, matching the spec example.
+ *
+ * Why max-concurrent and not COUNT(*) of overlapping rows:
+ *   The spec says "the system shall not allow create/update if AT ANY MOMENT
+ *   the number of active sessions exceeds 5." `COUNT(*)` answers "how many
+ *   sessions touch the window" — which over-counts for any proposed window
+ *   that's longer than the briefest existing session it touches. A 3-hour
+ *   proposal in a dense arena trivially touches 8+ sessions even though only
+ *   5 are concurrent at any instant. The cap check must compare against the
+ *   peak concurrent count, computed via a sweep over the clipped events.
  *
  * `excludeId` is used by update() so a session doesn't count against itself.
  */
-async function countOverlapping(
+async function maxConcurrentDuring(
   client: PoolClient,
   arenaId: number,
   start: Date,
   end: Date,
   excludeId?: number,
 ): Promise<number> {
-  const { rows } = await client.query<{ c: string }>(
+  // Pull just the bounds of every overlapping active session.
+  const { rows } = await client.query<{ s: Date; e: Date }>(
     `
-    SELECT COUNT(*)::text AS c
+    SELECT lower(during) AS s, upper(during) AS e
     FROM sessions
     WHERE arena_id = $1
       AND status = 'active'
@@ -114,7 +125,33 @@ async function countOverlapping(
       ? [arenaId, rangeLiteral(start, end), excludeId]
       : [arenaId, rangeLiteral(start, end)],
   );
-  return Number(rows[0]?.c ?? 0);
+  if (rows.length === 0) return 0;
+
+  // Sweep-line over events CLIPPED to the proposed window. Each session
+  // contributes +1 when it (re-)enters the window and -1 when it leaves.
+  // Sort: at the same instant, -1 (ends) must fire BEFORE +1 (starts) so two
+  // sessions where one ends exactly when the next begins don't count as
+  // concurrent — that's the half-open semantics the rest of the system uses.
+  const winStart = start.getTime();
+  const winEnd = end.getTime();
+  type Event = { t: number; delta: number; order: number };
+  const events: Event[] = [];
+  for (const r of rows) {
+    const sMs = Math.max(new Date(r.s).getTime(), winStart);
+    const eMs = Math.min(new Date(r.e).getTime(), winEnd);
+    if (eMs <= sMs) continue;
+    events.push({ t: sMs, delta: +1, order: 1 });
+    events.push({ t: eMs, delta: -1, order: 0 });
+  }
+  events.sort((a, b) => a.t - b.t || a.order - b.order);
+
+  let active = 0;
+  let max = 0;
+  for (const ev of events) {
+    active += ev.delta;
+    if (active > max) max = active;
+  }
+  return max;
 }
 
 // =============================================================================
@@ -213,7 +250,7 @@ export async function checkAvailability(
   }
   const client = await pool.connect();
   try {
-    const count = await countOverlapping(client, arenaId, start, end);
+    const count = await maxConcurrentDuring(client, arenaId, start, end);
     return { available: count < ARENA_CAPACITY, conflictingCount: count, capacity: ARENA_CAPACITY };
   } finally {
     client.release();
@@ -229,7 +266,7 @@ export async function createSession(input: SessionInput): Promise<SessionRecord>
   }
 
   return withArenaLock(norm.arenaId, async (client) => {
-    const conflicting = await countOverlapping(client, norm.arenaId, norm.start, norm.end);
+    const conflicting = await maxConcurrentDuring(client, norm.arenaId, norm.start, norm.end);
     if (conflicting >= ARENA_CAPACITY) {
       throw new DomainError(
         'SLOT_UNAVAILABLE',
@@ -282,7 +319,7 @@ export async function updateSession(id: number, input: UpdateSessionInput): Prom
   }
 
   return withArenaLock(currentRec.arenaId, async (client) => {
-    const conflicting = await countOverlapping(client, currentRec.arenaId, start, end, id);
+    const conflicting = await maxConcurrentDuring(client, currentRec.arenaId, start, end, id);
     if (conflicting >= ARENA_CAPACITY) {
       throw new DomainError(
         'SLOT_UNAVAILABLE',
