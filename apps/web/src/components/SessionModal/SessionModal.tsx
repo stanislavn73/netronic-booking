@@ -73,7 +73,11 @@ export function SessionModal({ mode, arenaId, date, onClose }: Props) {
     () => datetimeLocalToIso(watch('startTime')),
     [watch('startTime')],
   );
-  const { data: availability } = useAvailabilityProbe(arenaId, currentStartIso);
+  const { data: availability } = useAvailabilityProbe(
+    arenaId,
+    currentStartIso,
+    isEdit ? mode.session.id : undefined,
+  );
   const maxFitMin = availability?.maxAvailableDurationMinutes;
 
   // On NEW sessions, when the probe first reports back, lower the default

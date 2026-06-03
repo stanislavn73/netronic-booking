@@ -149,18 +149,25 @@ export interface AvailabilityResult {
 /**
  * Read-only capacity probe for a proposed `[start, end)`. No lock needed —
  * the answer can shift the moment we return, callers must re-check on write.
+ *
+ * `excludeId` drops a session from the count so an EDIT can probe its own new
+ * window without counting itself against the cap — matching what
+ * {@link updateSession} does on write. Without it the hint would under-report
+ * room (e.g. "no room" for a save that actually succeeds).
+ *
  * @throws DomainError<'ARENA_NOT_FOUND'>
  */
 export async function checkAvailability(
   arenaId: number,
   start: Date,
   end: Date,
+  excludeId?: number,
 ): Promise<AvailabilityResult> {
   if (!(await arenaExists(pool, arenaId))) {
     throw new DomainError('ARENA_NOT_FOUND', `Arena ${arenaId} not found`, { arenaId });
   }
-  const probe = await probeConcurrency(pool, arenaId, { start, end });
-  const maxAvailMs = await maxAvailableDurationMs(pool, arenaId, start);
+  const probe = await probeConcurrency(pool, arenaId, { start, end }, excludeId);
+  const maxAvailMs = await maxAvailableDurationMs(pool, arenaId, start, undefined, excludeId);
   return {
     available: probe.max < ARENA_CAPACITY,
     conflictingCount: probe.max,

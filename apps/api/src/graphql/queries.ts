@@ -64,10 +64,14 @@ builder.queryType({
         arenaId: t.arg.id({ required: true }),
         startTime: t.arg({ type: 'DateTime', required: true }),
         durationMinutes: t.arg.int({ required: true }),
+        // When editing, exclude the session being moved so it doesn't count
+        // against its own cap — mirrors updateSession's write-time probe.
+        excludeSessionId: t.arg.id({ required: false }),
       },
-      resolve: (_p, { arenaId, startTime, durationMinutes }) => {
+      resolve: (_p, { arenaId, startTime, durationMinutes, excludeSessionId }) => {
         const end = new Date(startTime.getTime() + minutes(durationMinutes));
-        return checkAvailability(Number(arenaId), startTime, end);
+        const excludeId = excludeSessionId == null ? undefined : Number(excludeSessionId);
+        return checkAvailability(Number(arenaId), startTime, end, excludeId);
       },
     }),
 

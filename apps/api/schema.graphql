@@ -44,7 +44,7 @@ type Query {
   arena(id: ID!): Arena
   arenas(limit: Int = 50, offset: Int = 0, search: String): [Arena!]!
   capacity: Int!
-  checkAvailability(arenaId: ID!, durationMinutes: Int!, startTime: DateTime!): AvailabilityResult!
+  checkAvailability(arenaId: ID!, durationMinutes: Int!, excludeSessionId: ID, startTime: DateTime!): AvailabilityResult!
   maxDurationMinutes: Int!
   minDurationMinutes: Int!
   sessionsByArena(arenaId: ID!, from: DateTime!, to: DateTime!): [Session!]!

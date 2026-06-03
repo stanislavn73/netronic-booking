@@ -33,15 +33,19 @@ query Arenas($search: String) {
 }
 
 # Probes occupancy at a proposed start. Used by the modal's "Fits up to N min".
+# `excludeSessionId` is set when editing so the session doesn't count against
+# its own cap (otherwise the hint under-reports room for an unchanged save).
 query CheckAvailability(
   $arenaId: ID!
   $startTime: DateTime!
   $durationMinutes: Int!
+  $excludeSessionId: ID
 ) {
   checkAvailability(
     arenaId: $arenaId
     startTime: $startTime
     durationMinutes: $durationMinutes
+    excludeSessionId: $excludeSessionId
   ) {
     available
     conflictingCount
