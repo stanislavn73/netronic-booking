@@ -1,14 +1,28 @@
-/** Internal type. DO NOT USE DIRECTLY. */
-type Exact<T extends { [key: string]: unknown }> = { [K in keyof T]: T[K] };
-/** Internal type. DO NOT USE DIRECTLY. */
-export type Incremental<T> = T | { [P in keyof T]?: P extends ' $fragmentName' | '__typename' ? T[P] : never };
 import type { TypedDocumentNode as DocumentNode } from '@apollo/client/core';
+export type Maybe<T> = T | null;
+export type InputMaybe<T> = Maybe<T>;
+export type Exact<T extends { [key: string]: unknown }> = { [K in keyof T]: T[K] };
+export type MakeOptional<T, K extends keyof T> = Omit<T, K> & { [SubKey in K]?: Maybe<T[SubKey]> };
+export type MakeMaybe<T, K extends keyof T> = Omit<T, K> & { [SubKey in K]: Maybe<T[SubKey]> };
+export type MakeEmpty<T extends { [key: string]: unknown }, K extends keyof T> = { [_ in K]?: never };
+export type Incremental<T> = T | { [P in keyof T]?: P extends ' $fragmentName' | '__typename' ? T[P] : never };
+/** All built-in and custom scalars, mapped to their actual values */
+export type Scalars = {
+  ID: { input: string; output: string; }
+  String: { input: string; output: string; }
+  Boolean: { input: boolean; output: boolean; }
+  Int: { input: number; output: number; }
+  Float: { input: number; output: number; }
+  /** A date-time string at UTC, such as 2007-12-03T10:15:30Z, compliant with the `date-time` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar. */
+  DateTime: { input: string; output: string; }
+};
+
 export type CreateSessionInput = {
-  arenaId: string;
-  durationMinutes?: number | null | undefined;
-  endTime?: string | null | undefined;
-  playerName?: string | null | undefined;
-  startTime: string;
+  arenaId: Scalars['ID']['input'];
+  durationMinutes?: InputMaybe<Scalars['Int']['input']>;
+  endTime?: InputMaybe<Scalars['DateTime']['input']>;
+  playerName?: InputMaybe<Scalars['String']['input']>;
+  startTime: Scalars['DateTime']['input'];
 };
 
 export type SessionStatus =
@@ -16,75 +30,62 @@ export type SessionStatus =
   | 'cancelled';
 
 export type UpdateSessionInput = {
-  durationMinutes?: number | null | undefined;
-  endTime?: string | null | undefined;
-  playerName?: string | null | undefined;
-  startTime?: string | null | undefined;
+  durationMinutes?: InputMaybe<Scalars['Int']['input']>;
+  endTime?: InputMaybe<Scalars['DateTime']['input']>;
+  playerName?: InputMaybe<Scalars['String']['input']>;
+  startTime?: InputMaybe<Scalars['DateTime']['input']>;
 };
 
-export type SessionFieldsFragment = { id: string, arenaId: string, startTime: string, endTime: string, durationMinutes: number, playerName: string | null, status: SessionStatus };
+export type SessionFieldsFragment = { __typename?: 'Session', id: string, arenaId: string, startTime: string, endTime: string, durationMinutes: number, playerName: string | null, status: SessionStatus };
 
-export type SlotUnavailableFieldsFragment = { message: string, conflictingCount: number, capacity: number, fillsUpAt: string | null, maxAvailableDurationMinutes: number, suggestions: Array<{ start: string, end: string }> };
+export type SlotUnavailableFieldsFragment = { __typename?: 'SlotUnavailable', message: string, conflictingCount: number, capacity: number, fillsUpAt: string | null, maxAvailableDurationMinutes: number, suggestions: Array<{ __typename?: 'Slot', start: string, end: string }> };
 
 export type ArenasQueryVariables = Exact<{
-  search?: string | null | undefined;
+  search: InputMaybe<Scalars['String']['input']>;
 }>;
 
 
-export type ArenasQuery = { arenas: Array<{ id: string, name: string }> };
+export type ArenasQuery = { __typename?: 'Query', arenas: Array<{ __typename?: 'Arena', id: string, name: string }> };
 
 export type CheckAvailabilityQueryVariables = Exact<{
-  arenaId: string;
-  startTime: string;
-  durationMinutes: number;
+  arenaId: Scalars['ID']['input'];
+  startTime: Scalars['DateTime']['input'];
+  durationMinutes: Scalars['Int']['input'];
 }>;
 
 
-export type CheckAvailabilityQuery = { checkAvailability: { available: boolean, conflictingCount: number, capacity: number, maxAvailableDurationMinutes: number, fillsUpAt: string | null } };
+export type CheckAvailabilityQuery = { __typename?: 'Query', checkAvailability: { __typename?: 'AvailabilityResult', available: boolean, conflictingCount: number, capacity: number, maxAvailableDurationMinutes: number, fillsUpAt: string | null } };
 
 export type SessionsByArenaQueryVariables = Exact<{
-  arenaId: string;
-  from: string;
-  to: string;
+  arenaId: Scalars['ID']['input'];
+  from: Scalars['DateTime']['input'];
+  to: Scalars['DateTime']['input'];
 }>;
 
 
-export type SessionsByArenaQuery = { sessionsByArena: Array<{ id: string, arenaId: string, startTime: string, endTime: string, durationMinutes: number, playerName: string | null, status: SessionStatus }> };
+export type SessionsByArenaQuery = { __typename?: 'Query', sessionsByArena: Array<{ __typename?: 'Session', id: string, arenaId: string, startTime: string, endTime: string, durationMinutes: number, playerName: string | null, status: SessionStatus }> };
 
 export type CreateSessionMutationVariables = Exact<{
   input: CreateSessionInput;
 }>;
 
 
-export type CreateSessionMutation = { createSession:
-    | { __typename: 'NotFound', message: string }
-    | { __typename: 'SessionPayload', session: { id: string, arenaId: string, startTime: string, endTime: string, durationMinutes: number, playerName: string | null, status: SessionStatus } }
-    | { __typename: 'SlotUnavailable', message: string, conflictingCount: number, capacity: number, fillsUpAt: string | null, maxAvailableDurationMinutes: number, suggestions: Array<{ start: string, end: string }> }
-    | { __typename: 'ValidationFailed', issues: Array<{ field: string, message: string }> }
-   };
+export type CreateSessionMutation = { __typename?: 'Mutation', createSession: { __typename: 'NotFound', message: string } | { __typename: 'SessionPayload', session: { __typename?: 'Session', id: string, arenaId: string, startTime: string, endTime: string, durationMinutes: number, playerName: string | null, status: SessionStatus } } | { __typename: 'SlotUnavailable', message: string, conflictingCount: number, capacity: number, fillsUpAt: string | null, maxAvailableDurationMinutes: number, suggestions: Array<{ __typename?: 'Slot', start: string, end: string }> } | { __typename: 'ValidationFailed', issues: Array<{ __typename?: 'ValidationIssue', field: string, message: string }> } };
 
 export type UpdateSessionMutationVariables = Exact<{
-  id: string;
+  id: Scalars['ID']['input'];
   input: UpdateSessionInput;
 }>;
 
 
-export type UpdateSessionMutation = { updateSession:
-    | { __typename: 'NotFound', message: string }
-    | { __typename: 'SessionPayload', session: { id: string, arenaId: string, startTime: string, endTime: string, durationMinutes: number, playerName: string | null, status: SessionStatus } }
-    | { __typename: 'SlotUnavailable', message: string, conflictingCount: number, capacity: number, fillsUpAt: string | null, maxAvailableDurationMinutes: number, suggestions: Array<{ start: string, end: string }> }
-    | { __typename: 'ValidationFailed', issues: Array<{ field: string, message: string }> }
-   };
+export type UpdateSessionMutation = { __typename?: 'Mutation', updateSession: { __typename: 'NotFound', message: string } | { __typename: 'SessionPayload', session: { __typename?: 'Session', id: string, arenaId: string, startTime: string, endTime: string, durationMinutes: number, playerName: string | null, status: SessionStatus } } | { __typename: 'SlotUnavailable', message: string, conflictingCount: number, capacity: number, fillsUpAt: string | null, maxAvailableDurationMinutes: number, suggestions: Array<{ __typename?: 'Slot', start: string, end: string }> } | { __typename: 'ValidationFailed', issues: Array<{ __typename?: 'ValidationIssue', field: string, message: string }> } };
 
 export type DeleteSessionMutationVariables = Exact<{
-  id: string;
+  id: Scalars['ID']['input'];
 }>;
 
 
-export type DeleteSessionMutation = { deleteSession:
-    | { __typename: 'NotFound', message: string }
-    | { __typename: 'SessionDeleted', id: string }
-   };
+export type DeleteSessionMutation = { __typename?: 'Mutation', deleteSession: { __typename: 'NotFound', message: string } | { __typename: 'SessionDeleted', id: string } };
 
 export const SessionFieldsFragmentDoc = {"kind":"Document","definitions":[{"kind":"FragmentDefinition","name":{"kind":"Name","value":"SessionFields"},"typeCondition":{"kind":"NamedType","name":{"kind":"Name","value":"Session"}},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"arenaId"}},{"kind":"Field","name":{"kind":"Name","value":"startTime"}},{"kind":"Field","name":{"kind":"Name","value":"endTime"}},{"kind":"Field","name":{"kind":"Name","value":"durationMinutes"}},{"kind":"Field","name":{"kind":"Name","value":"playerName"}},{"kind":"Field","name":{"kind":"Name","value":"status"}}]}}]} as unknown as DocumentNode<SessionFieldsFragment, unknown>;
 export const SlotUnavailableFieldsFragmentDoc = {"kind":"Document","definitions":[{"kind":"FragmentDefinition","name":{"kind":"Name","value":"SlotUnavailableFields"},"typeCondition":{"kind":"NamedType","name":{"kind":"Name","value":"SlotUnavailable"}},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"message"}},{"kind":"Field","name":{"kind":"Name","value":"conflictingCount"}},{"kind":"Field","name":{"kind":"Name","value":"capacity"}},{"kind":"Field","name":{"kind":"Name","value":"suggestions"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"start"}},{"kind":"Field","name":{"kind":"Name","value":"end"}}]}},{"kind":"Field","name":{"kind":"Name","value":"fillsUpAt"}},{"kind":"Field","name":{"kind":"Name","value":"maxAvailableDurationMinutes"}}]}}]} as unknown as DocumentNode<SlotUnavailableFieldsFragment, unknown>;
