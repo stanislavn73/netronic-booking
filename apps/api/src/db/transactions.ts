@@ -1,11 +1,12 @@
 /**
  * Transaction + per-arena advisory-lock helpers.
  *
- * The lock guarantees write serialization within an arena so the
- * atomic-pick-a-lane INSERT can't race itself. Once migration 0003 lands
- * (EXCLUDE on `arena_id, lane, during`), Postgres becomes the source of
- * truth for the cap and the lock becomes belt-and-suspenders → can be
- * removed at that point.
+ * The lock guarantees write serialization within an arena: it is what lets
+ * `services/sessions.ts` sweep the proposed window for peak concurrency and
+ * then write, with no TOCTOU gap — no other create/update for the same arena
+ * can interleave between the sweep and the COMMIT. It is the source of truth
+ * for the 5-concurrent cap. (The lane-EXCLUDE alternative that would have made
+ * the cap a pure schema invariant was abandoned — see `0002_lanes.NOTES.md`.)
  */
 import type { PoolClient } from 'pg';
 import { pool } from './index.js';

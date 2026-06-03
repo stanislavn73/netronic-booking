@@ -1,12 +1,41 @@
 # 0002_lanes — phased rollout
 
-> **Status: paused after step 1.** Step 1 (column-only 0002) is deployed.
-> Steps 2–3 (backfill + EXCLUDE) are blocked on Neon free-tier storage
-> being too tight to absorb a ~2M-row UPDATE's MVCC bloat. Restart via
-> `pnpm --filter @app/api reset:seed:tiny` (shrinks the dataset) or a
-> Neon Launch upgrade. The renamed file
+> **⛔️ SUPERSEDED / ABANDONED — do NOT apply step 2 (backfill) or step 3
+> (0003 EXCLUDE).** This phased lane rollout was the *cause* of the
+> production ">5 concurrent" regression, and the design is also subtly
+> wrong even when completed. Cap enforcement is now done correctly by a
+> max-concurrent sweep under the per-arena advisory lock — see
+> `services/sessions.ts` (`assertHasRoom`). The `lane` column added by
+> `0002_lanes.sql` is now **dormant**: it is written NULL, read by nothing,
+> and kept only to avoid a needless `DROP COLUMN` on a large prod table.
+>
+> ### Why the lane model was abandoned
+>
+> 1. **It under-counted pre-existing rows → the actual prod bug.** The
+>    enforcement INSERT picked a free lane via `NOT EXISTS (… s.lane =
+>    g.lane …)`. The seed/COPY path (`scripts/seed.ts`) inserts rows with
+>    NO lane, so `lane IS NULL`, and `NULL = g.lane` is never true. Every
+>    seeded session was invisible to the check, so you could stack 5 *new*
+>    sessions on top of an already-full window → 10 concurrent. Backfilling
+>    would have masked this for seeded data, but any future NULL-lane write
+>    path would reopen it.
+> 2. **It over-restricts valid bookings even after backfill.** A fixed
+>    greedy `(arena, lane)`-no-overlap EXCLUDE is interval *partitioning*,
+>    not a "≤5 at any instant" cap. A long session whose window merely
+>    touches five lanes' otherwise-disjoint short sessions is rejected even
+>    though peak concurrency is 1 — violating the spec's "no excessive
+>    restrictions" rule. A correct schema-level cap would need a sweep,
+>    which a simple EXCLUDE cannot express.
+>
+> The original `paused-after-step-1` notes are kept below for history.
+>
+> ---
+>
+> **Status (historical): paused after step 1.** Step 1 (column-only 0002) is
+> deployed. Steps 2–3 (backfill + EXCLUDE) were blocked on Neon free-tier
+> storage being too tight to absorb a ~2M-row UPDATE's MVCC bloat. The file
 > `0003_lane_constraints.sql.pending` is skipped by `scripts/migrate.ts`
-> until you rename it back to `.sql`.
+> until renamed back to `.sql` — leave it parked.
 
 The original single-shot 0002 (column + backfill + EXCLUDE in one migration)
 proved unsafe at production scale on Render's free tier — the backfill

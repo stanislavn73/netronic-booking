@@ -3,17 +3,22 @@
  * concurrent active sessions per arena.
  *
  * SQL access lives in `db/sessions.repo.ts`. Sweep-line math in `db/sweep.ts`.
- * This file is just orchestration: validate → lock → atomic-pick-a-lane
- * INSERT/UPDATE → probe-for-meta on cap reach.
+ * This file is just orchestration: validate → lock → assert-room → INSERT/UPDATE.
  *
- * Current concurrency model: per-arena `pg_advisory_xact_lock` (via
- * `withArenaLock`) serializes writes for the same arena. The atomic-pick-a
- * lane INSERT cannot race itself while the lock is held.
+ * Concurrency model: per-arena `pg_advisory_xact_lock` (via `withArenaLock`)
+ * serializes every create/update for the same arena. Inside that lock we run
+ * a max-concurrent sweep over the proposed window (`assertHasRoom`); only if
+ * peak concurrency is below the cap do we write. Because the lock blocks all
+ * other writers for the arena until we COMMIT, there is no TOCTOU gap between
+ * the sweep and the write. Different arenas proceed in parallel.
  *
- * Migration 0003 (parked — see `migrations/0003_lane_constraints.sql.pending`)
- * will add a Postgres EXCLUDE constraint that makes the cap a schema-level
- * invariant. At that point the advisory lock becomes redundant — replace
- * `withArenaLock` with `withLaneRetry` from `db/pg-errors.ts`.
+ * Why a sweep and not a per-`lane` EXCLUDE constraint: a fixed-lane model
+ * (migration 0002's `lane` column + the parked 0003 EXCLUDE) does NOT express
+ * "≤ 5 at any instant" — it both under-counts pre-existing NULL-lane rows
+ * (the prod ">5 booked" regression) and over-restricts valid bookings whose
+ * window spans several lanes' disjoint sessions. The cap is "max concurrent",
+ * so we compute exactly that, the same way `checkAvailability` does. See
+ * `0002_lanes.NOTES.md` for the post-mortem.
  */
 import type { Pool, PoolClient } from 'pg';
 import { pool } from '../db/index.js';
@@ -168,15 +173,15 @@ export async function checkAvailability(
 /**
  * Create an active session for an arena.
  *
- * Inside the per-arena advisory lock, runs the atomic-pick-a-lane INSERT.
- * If 0 rows return, the arena is at capacity for the requested window —
- * we then run a concurrency probe purely to populate `fillsUpAt` and
- * `maxAvailableDurationMinutes` on the SLOT_UNAVAILABLE meta.
+ * Inside the per-arena advisory lock: sweep the proposed window for peak
+ * concurrency and reject with SLOT_UNAVAILABLE if it's already at the cap;
+ * otherwise INSERT. The lock guarantees no other writer for this arena can
+ * slip in between the sweep and the insert.
  *
  * @throws DomainError<'VALIDATION_FAILED'> on Zod parse failure (re-thrown ZodError).
  * @throws DomainError<'INVALID_DURATION'> if the derived window violates bounds.
  * @throws DomainError<'ARENA_NOT_FOUND'> if `input.arenaId` doesn't exist.
- * @throws DomainError<'SLOT_UNAVAILABLE'> if no lane fits the requested window.
+ * @throws DomainError<'SLOT_UNAVAILABLE'> if the window is already at capacity.
  */
 export async function createSession(input: SessionInput): Promise<SessionRecord> {
   const norm = normalizeInput(SessionInputSchema.parse(input));
@@ -186,14 +191,13 @@ export async function createSession(input: SessionInput): Promise<SessionRecord>
     });
   }
   return withArenaLock(norm.arenaId, async (client) => {
-    const inserted = await insertActiveSession(client, {
+    await assertHasRoom(client, norm.arenaId, { start: norm.start, end: norm.end }, undefined, 'create');
+    return insertActiveSession(client, {
       arenaId: norm.arenaId,
       start: norm.start,
       end: norm.end,
       playerName: norm.playerName ?? null,
     });
-    if (inserted) return inserted;
-    return throwSlotUnavailable(client, norm.arenaId, norm.start, norm.end, undefined, 'create');
   });
 }
 
@@ -228,40 +232,42 @@ export async function updateSession(
 
   const playerName = parsed.playerName === undefined ? current.playerName : parsed.playerName;
   return withArenaLock(current.arenaId, async (client) => {
-    const result = await updateSessionRow(client, id, {
-      arenaId: current.arenaId,
-      start,
-      end,
-      playerName,
-    });
-    if (result.kind === 'updated') return result.row;
+    // Exclude this session from the probe so it doesn't count against itself.
+    await assertHasRoom(client, current.arenaId, { start, end }, id, 'update');
+    const result = await updateSessionRow(client, id, { start, end, playerName });
     if (result.kind === 'not_found') {
       throw new DomainError('SESSION_NOT_FOUND', `Session ${id} not found`, { sessionId: id });
     }
-    return throwSlotUnavailable(client, current.arenaId, start, end, id, 'update');
+    return result.row;
   });
 }
 
 /**
- * Build and throw a SLOT_UNAVAILABLE DomainError with a fresh concurrency
- * probe over the requested window. `excludeId` excludes a session from
- * the probe so update paths don't count it against itself.
+ * Guard a write: throw SLOT_UNAVAILABLE if adding one session spanning
+ * `window` would push peak concurrency past the cap. A new session covers the
+ * whole window, so it adds +1 at every instant — there is room iff existing
+ * peak concurrency is strictly below {@link ARENA_CAPACITY}. `excludeId`
+ * drops a session from the probe so update paths don't count it against
+ * itself. Must run under the arena lock so the answer can't go stale before
+ * the write.
+ *
+ * Counts ALL active rows in the window regardless of any `lane` value, which
+ * is what makes it correct against pre-existing (NULL-lane) data.
  */
-async function throwSlotUnavailable(
+async function assertHasRoom(
   q: Q,
   arenaId: number,
-  start: Date,
-  end: Date,
+  window: Window,
   excludeId: number | undefined,
   context: 'create' | 'update',
-): Promise<never> {
-  const window: Window = { start, end };
+): Promise<void> {
   const probe = await probeConcurrency(q, arenaId, window, excludeId);
-  const maxAvailMs = await maxAvailableDurationMs(q, arenaId, start, undefined, excludeId);
+  if (probe.max < ARENA_CAPACITY) return;
+  const maxAvailMs = await maxAvailableDurationMs(q, arenaId, window.start, undefined, excludeId);
   throw slotUnavailable({
     arenaId,
-    start,
-    end,
+    start: window.start,
+    end: window.end,
     probe,
     maxAvailableDurationMinutes: toMinutes(maxAvailMs),
     context,

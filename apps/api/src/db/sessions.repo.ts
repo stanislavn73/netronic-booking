@@ -2,7 +2,11 @@
  * Sessions repository — pure SQL access for sessions and arenas.
  *
  * No business rules live here. Cap enforcement, validation, and locking
- * belong to `services/sessions.ts`.
+ * belong to `services/sessions.ts`. In particular this layer does NOT decide
+ * whether a write fits the 5-concurrent cap — the service does that with a
+ * max-concurrent sweep under a per-arena advisory lock. Writes here are
+ * unconditional; the service is responsible for only calling them when there
+ * is room.
  *
  * All overlap queries use `arena_id = $1 AND status = 'active' AND during &&
  * $2::tstzrange` so they hit the partial GiST index defined in
@@ -14,13 +18,6 @@ import { parseRange, rangeLiteral } from './range.js';
 import type { Interval, Window } from './sweep.js';
 
 type Q = Pool | PoolClient;
-
-/**
- * Hard-coded lane count, matching `ARENA_CAPACITY` in validation.ts. Kept
- * here as a constant rather than imported to keep the repo layer free of
- * service-layer dependencies. If you change capacity, update both.
- */
-const ARENA_LANES = 5;
 
 /**
  * Plain DTO returned by every read path. Mirrors {@link SessionRecord} in
@@ -146,94 +143,58 @@ export async function selectSessionById(q: Q, id: number): Promise<SessionRow | 
 }
 
 /**
- * Insert a new active session, picking the first lane that's free over the
- * requested window. Returns `null` if all {@link ARENA_LANES} lanes are
- * occupied at some instant inside `[start, end)` — caller maps that to
- * `SLOT_UNAVAILABLE`.
+ * Insert a new active session. Unconditional — the caller (service layer)
+ * MUST have already verified there is room under the per-arena advisory lock
+ * via a max-concurrent sweep. There is no cap logic here.
  *
- * The `INSERT … SELECT FROM generate_series(…)` form is atomic: Postgres
- * evaluates the NOT EXISTS subquery against the same snapshot used by the
- * INSERT. Once the EXCLUDE constraint lands in 0003, concurrent racers can
- * additionally trip `23P03` — that's handled in the service layer.
+ * NB: the `lane` column (added by migration 0002 for an abandoned
+ * EXCLUDE-based enforcement experiment — see `0002_lanes.NOTES.md`) is left
+ * NULL. It is not read by anything and the cap no longer depends on it.
  */
 export async function insertActiveSession(
   q: Q,
   args: { arenaId: number; start: Date; end: Date; playerName: string | null },
-): Promise<SessionRow | null> {
+): Promise<SessionRow> {
   const { rows } = await q.query<RawRow>(
     `
-    INSERT INTO sessions (arena_id, lane, during, player_name, status)
-    SELECT $1, g.lane, $2::tstzrange, $3, 'active'
-    FROM generate_series(1, ${ARENA_LANES}) AS g(lane)
-    WHERE NOT EXISTS (
-      SELECT 1 FROM sessions s
-      WHERE s.arena_id = $1
-        AND s.lane = g.lane
-        AND s.status = 'active'
-        AND s.during && $2::tstzrange
-    )
-    ORDER BY g.lane
-    LIMIT 1
+    INSERT INTO sessions (arena_id, during, player_name, status)
+    VALUES ($1, $2::tstzrange, $3, 'active')
     RETURNING ${SESSION_COLS}
     `,
     [args.arenaId, rangeLiteral(args.start, args.end), args.playerName],
   );
-  return rows[0] ? rowToRecord(rows[0]) : null;
+  return rowToRecord(rows[0]!);
 }
 
 export type UpdateSessionRowResult =
   | { kind: 'updated'; row: SessionRow }
-  | { kind: 'not_found' }
-  | { kind: 'slot_unavailable' };
+  | { kind: 'not_found' };
 
 /**
- * Update a session's window and playerName, re-picking a free lane for the
- * new window. Excludes the session itself from the overlap probe so it
- * doesn't conflict with its own current position.
+ * Update a session's window and playerName. Unconditional — like
+ * {@link insertActiveSession}, the caller must have verified capacity for the
+ * new window (excluding this session) under the arena lock first.
  *
- *   - `updated`           — UPDATE applied; returns the new row.
- *   - `not_found`         — `id` doesn't exist.
- *   - `slot_unavailable`  — no lane fits the requested window.
+ *   - `updated`   — UPDATE applied; returns the new row.
+ *   - `not_found` — `id` doesn't exist (RETURNING yields no row).
  */
 export async function updateSessionRow(
   q: Q,
   id: number,
-  args: { arenaId: number; start: Date; end: Date; playerName: string | null },
+  args: { start: Date; end: Date; playerName: string | null },
 ): Promise<UpdateSessionRowResult> {
-  // Exists check first so callers can distinguish not-found from
-  // capacity-exhausted. Cheap (PK lookup).
-  const { rowCount: exists } = await q.query(
-    `SELECT 1 FROM sessions WHERE id = $1`,
-    [id],
-  );
-  if (!exists) return { kind: 'not_found' };
-
   const { rows } = await q.query<RawRow>(
     `
-    UPDATE sessions s
-    SET during = $2::tstzrange, player_name = $3, lane = picked.lane
-    FROM (
-      SELECT g.lane
-      FROM generate_series(1, ${ARENA_LANES}) AS g(lane)
-      WHERE NOT EXISTS (
-        SELECT 1 FROM sessions s2
-        WHERE s2.arena_id = $4
-          AND s2.lane = g.lane
-          AND s2.status = 'active'
-          AND s2.during && $2::tstzrange
-          AND s2.id <> $1
-      )
-      ORDER BY g.lane
-      LIMIT 1
-    ) AS picked
-    WHERE s.id = $1
+    UPDATE sessions
+    SET during = $2::tstzrange, player_name = $3
+    WHERE id = $1
     RETURNING ${SESSION_COLS}
     `,
-    [id, rangeLiteral(args.start, args.end), args.playerName, args.arenaId],
+    [id, rangeLiteral(args.start, args.end), args.playerName],
   );
   return rows[0]
     ? { kind: 'updated', row: rowToRecord(rows[0]) }
-    : { kind: 'slot_unavailable' };
+    : { kind: 'not_found' };
 }
 
 /** Soft-cancel: status='cancelled'. Returns the id, or null if not active. */

@@ -25,7 +25,12 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MIGRATION = join(__dirname, '..', 'src', 'db', 'migrations', '0001_init.sql');
+const MIGRATIONS_DIR = join(__dirname, '..', 'src', 'db', 'migrations');
+// Apply the same migrations the deployed DB has: 0001 (schema) + 0002 (the
+// nullable `lane` column). Applying 0002 means pre-existing rows inserted
+// without a lane keep `lane = NULL` — exactly the production seed's state —
+// so the "NULL-lane rows still count" regression test below is faithful.
+const MIGRATIONS = ['0001_init.sql', '0002_lanes.sql'];
 
 const ADMIN_URL =
   process.env.TEST_ADMIN_DATABASE_URL ?? 'postgres://booking:booking@localhost:5433/postgres';
@@ -54,10 +59,12 @@ beforeAll(async () => {
     // eslint-disable-next-line no-console
     console.log('[race-test] using test DB:', testUrl);
 
-    // 2. Apply the migration on the freshly-created DB.
-    const sql = await readFile(MIGRATION, 'utf8');
+    // 2. Apply the migrations on the freshly-created DB.
     const { pool } = await import('../src/db/index.js');
-    await pool.query(sql);
+    for (const file of MIGRATIONS) {
+      const sql = await readFile(join(MIGRATIONS_DIR, file), 'utf8');
+      await pool.query(sql);
+    }
     await pool.query("INSERT INTO arenas (id, name) VALUES (1, 'Test Arena')");
     await pool.query("SELECT setval('arenas_id_seq', 1, true)");
     // eslint-disable-next-line no-console
@@ -302,6 +309,51 @@ describe('race conditions on the 5-concurrent cap', () => {
         endTime: new Date('2030-04-01T13:00:00Z'),
       }),
     ).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+  }, 60_000);
+
+  it('pre-existing rows with lane IS NULL still count toward the cap (regression: prod ">5 booked" bug)', async () => {
+    // THE PROD BUG: enforcement was briefly done by an "atomic-pick-a-lane"
+    // INSERT whose overlap check was `s.lane = g.lane`. The seed/COPY path
+    // inserts rows WITHOUT a lane (lane IS NULL), and `NULL = g.lane` is never
+    // true — so every pre-existing seeded session was invisible to the check
+    // and you could stack 5 MORE on top of an already-full window (the red
+    // ">5" sessions the reviewer saw). This pins that those NULL-lane rows are
+    // counted, by inserting them the way the seed does and asserting the 6th
+    // create is rejected.
+    const { createSession } = await import('../src/services/sessions.js');
+    const { pool } = await import('../src/db/index.js');
+
+    await pool.query('TRUNCATE sessions RESTART IDENTITY');
+
+    // 5 active sessions inserted exactly like scripts/seed.ts COPY: no `lane`.
+    await pool.query(
+      `INSERT INTO sessions (arena_id, during, player_name, status)
+       SELECT 1, tstzrange($1::timestamptz, $2::timestamptz, '[)'), 'seed', 'active'
+       FROM generate_series(1, 5)`,
+      ['2030-05-01T10:00:00Z', '2030-05-01T11:00:00Z'],
+    );
+    // Sanity: they really are NULL-lane.
+    const { rows: laneRows } = await pool.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM sessions WHERE arena_id = 1 AND lane IS NULL`,
+    );
+    expect(Number(laneRows[0]?.n)).toBe(5);
+
+    // The window is already at capacity (5 concurrent) — a 6th must be rejected.
+    await expect(
+      createSession({
+        arenaId: 1,
+        startTime: new Date('2030-05-01T10:00:00Z'),
+        endTime: new Date('2030-05-01T11:00:00Z'),
+      }),
+    ).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+
+    // And the DB must still hold exactly 5, never 6.
+    const { rows } = await pool.query<{ c: string }>(
+      `SELECT COUNT(*)::text AS c FROM sessions
+       WHERE arena_id = 1 AND status = 'active'
+         AND during @> '2030-05-01T10:30:00Z'::timestamptz`,
+    );
+    expect(Number(rows[0]?.c)).toBe(5);
   }, 60_000);
 
   it('the "touching is not overlap" rule holds (5 ending at 11:00 + 5 starting at 11:00)', async () => {

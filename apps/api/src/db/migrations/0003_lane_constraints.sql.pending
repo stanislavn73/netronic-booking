@@ -1,4 +1,13 @@
 -- =============================================================================
+-- ⛔️ ABANDONED — DO NOT APPLY. See 0002_lanes.NOTES.md ("Why the lane model
+-- was abandoned"). The per-(arena, lane) EXCLUDE below does NOT express the
+-- spec's "≤5 concurrent at any instant" cap: it over-restricts valid bookings
+-- (a long session touching five lanes' disjoint short sessions is rejected
+-- even at peak concurrency 1). Cap enforcement now lives in
+-- services/sessions.ts (`assertHasRoom`, a max-concurrent sweep under the
+-- per-arena advisory lock). This file is kept only as a record of the
+-- abandoned approach. Applying it would reintroduce a spec violation.
+-- =============================================================================
 -- 0003_lane_constraints.sql — phased rollout, step 2 of 2: enforce the cap.
 --
 -- DO NOT push this migration to production until you've run the lane
