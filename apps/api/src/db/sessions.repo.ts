@@ -8,9 +8,12 @@
  * unconditional; the service is responsible for only calling them when there
  * is room.
  *
- * All overlap queries use `arena_id = $1 AND status = 'active' AND during &&
- * $2::tstzrange` so they hit the partial GiST index defined in
- * `migrations/0001_init.sql`.
+ * All overlap reads share {@link ACTIVE_IN_WINDOW}: `status = 'active'` + a
+ * `lower(during)` band + `during && $2::tstzrange`. The band is what lets the
+ * planner use the partial btree on `(arena_id, lower(during))` as an
+ * arena-scoped index range scan, instead of the GiST treating `arena_id` as a
+ * post-index filter and walking every arena's rows that touch the window. Both
+ * indexes live in `migrations/0001_init.sql`.
  */
 import type { Pool, PoolClient } from 'pg';
 import { pool } from './index.js';
@@ -36,6 +39,29 @@ export interface SessionRow {
 }
 
 const SESSION_COLS = `id, arena_id, during::text AS during, player_name, status, created_at, updated_at`;
+
+/**
+ * Shared "active session overlapping the window in `$2`" predicate (everything
+ * after the per-query `arena_id` clause).
+ *
+ * `during && $2::tstzrange` is the exact half-open overlap test. The two
+ * `lower(during)` bounds in front of it are a SARGable band that makes the
+ * partial btree `(arena_id, lower(during)) WHERE status='active'` usable: with
+ * a bounded `lower(during)` the planner puts `arena_id` in the Index Cond and
+ * range-scans just this arena's rows, rather than GiST-scanning every arena's
+ * rows in the time window and discarding ~99% by filter. This is the
+ * difference that keeps the hot paths fast as the table grows to the spec's
+ * 1000 arenas × 5y.
+ *
+ * The lower band is sound — never excludes a real overlap — because the DB
+ * CHECK `sessions_max_duration_24h` caps every session at 24h, so any row
+ * overlapping `$2` must start no earlier than `lower($2) - 24h`. (If that cap
+ * is ever raised, widen the interval here to match.)
+ */
+const ACTIVE_IN_WINDOW = `status = 'active'
+      AND lower(during) >= lower($2::tstzrange) - interval '24 hours'
+      AND lower(during) <  upper($2::tstzrange)
+      AND during && $2::tstzrange`;
 
 interface RawRow {
   id: string | number;
@@ -81,8 +107,7 @@ export async function selectActiveIntervals(
     SELECT lower(during) AS s, upper(during) AS e
     FROM sessions
     WHERE arena_id = $1
-      AND status = 'active'
-      AND during && $2::tstzrange
+      AND ${ACTIVE_IN_WINDOW}
       ${excludeId ? 'AND id <> $3' : ''}
   `;
   const params: unknown[] = [arenaId, rangeLiteral(window.start, window.end)];
@@ -101,8 +126,7 @@ export async function selectActiveSessions(
     `SELECT ${SESSION_COLS}
      FROM sessions
      WHERE arena_id = $1
-       AND status = 'active'
-       AND during && $2::tstzrange
+       AND ${ACTIVE_IN_WINDOW}
      ORDER BY lower(during) ASC`,
     [arenaId, rangeLiteral(window.start, window.end)],
   );
@@ -121,8 +145,7 @@ export async function selectActiveSessionsForArenas(
     `SELECT ${SESSION_COLS}
      FROM sessions
      WHERE arena_id = ANY($1::bigint[])
-       AND status = 'active'
-       AND during && $2::tstzrange
+       AND ${ACTIVE_IN_WINDOW}
      ORDER BY arena_id, lower(during) ASC`,
     [arenaIds, rangeLiteral(window.start, window.end)],
   );
