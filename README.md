@@ -45,7 +45,11 @@ make seed
   DB on first volume creation, so re-using a stale volume gives the dreaded
   `role "booking" does not exist`.
 - `make up` — starts Postgres 16 and waits for it to accept connections.
-- `make migrate` — applies `apps/api/src/db/migrations/0001_init.sql`.
+- `make migrate` — applies every numbered `*.sql` in
+  `apps/api/src/db/migrations/` in order (currently `0001_init.sql` +
+  `0002_lanes.sql`); `migrate.ts` records each applied file, so re-runs are
+  no-ops. `0003_lane_constraints.sql.pending` is intentionally parked — the
+  fixed-lane cap model it would enforce was abandoned (see `0002_lanes.NOTES.md`).
 - `make seed` — generates 100 arenas × 1 year of dense bookings via
   `COPY FROM STDIN`. See "Seed scale" below to crank it up.
 
@@ -118,7 +122,8 @@ apps/
     src/
       db/
         schema.ts            # Drizzle typed schema
-        migrations/0001_init.sql   # canonical DDL — tstzrange, GiST, CHECKs
+        migrations/            # 0001 init DDL (tstzrange, GiST, CHECKs);
+                               #   0002 adds lane column; 0003 parked (abandoned)
         range.ts             # tstzrange ↔ Date helpers
       services/
         sessions.ts          # ★ advisory-lock CRUD, the heart of the system
@@ -399,7 +404,10 @@ Postgres separately — not worth it.
    - `DATABASE_URL` — the Neon pooled URL
    - `WEB_ORIGIN` — set after step 3 (e.g. `https://my-app.netlify.app`)
 
-   First deploy runs `pnpm migrate` automatically via `preDeployCommand`.
+   Migrations run automatically on every boot — `render.yaml`'s `startCommand`
+   is `pnpm migrate && … tsx src/index.ts` (Render's free tier has no
+   `preDeployCommand`). `migrate.ts` records applied files, so the migrate step
+   is a no-op once the schema is current.
 
 3. **Web — Netlify** (<https://netlify.com>): New site from Git → pick this
    repo. Set **Base directory** to `apps/web`; Netlify reads
